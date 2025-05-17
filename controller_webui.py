@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Thread-Manager Live Monitor – v3.1-fixed-strip
+Thread-Manager Live Monitor + One-Shot Commands  (v4.1)
 
-Same as the v3.1 you supplied, plus:
-    • fixed-length 100-sample strip per antenna
-    • graphs update in-place (no flicker), toggle button intact
+* Default metric view = GRAPHS (100-sample fixed strip, no flicker).
+* COMMANDS pane loads the list once; buttons stay, terminal output
+  persists.
 """
-import argparse, re, socket, threading, time
+import argparse, socket, threading, time, re
 from collections import defaultdict, deque
 from typing import Dict, Deque, Any
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, request, Response, abort
 
 ##############################################################################
-# -- regex & parsing helpers (unchanged) -------------------------------------
+# ---------------------------  Stream parsing  ------------------------------
 _RX_ANT_RE = re.compile(
     r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+RX_ANT\s+"
     r"(?P<freq>\d+):(?P<mcs>\d+):(?P<bw>\d+)\s+"
@@ -26,16 +26,19 @@ _TX_ANT_RE = re.compile(
     r"(?P<p_inj>\d+):(?P<p_drop>\d+):"
     r"(?P<lat_min>\d+):(?P<lat_avg>\d+):(?P<lat_max>\d+)"
 )
-_PKT_RE = re.compile(r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+PKT\s+(?P<vals>(?:\d+:){10}\d+)$")
+_PKT_RE = re.compile(
+    r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+PKT\s+"
+    r"(?P<vals>(?:\d+:){10}\d+)$"
+)
 PKT_FIELDS = [
-    "count_p_all", "count_b_all", "count_p_dec_err",
-    "count_p_session", "count_p_data", "count_p_uniq",
-    "count_p_fec_recovered", "count_p_lost", "count_p_bad",
-    "count_p_outgoing", "count_b_outgoing",
+    "count_p_all","count_b_all","count_p_dec_err",
+    "count_p_session","count_p_data","count_p_uniq",
+    "count_p_fec_recovered","count_p_lost","count_p_bad",
+    "count_p_outgoing","count_b_outgoing",
 ]
 
 ##############################################################################
-# -- in-memory store ---------------------------------------------------------
+# ---------------------------  In-memory store  -----------------------------
 BUFFER = 200
 _metrics_lock = threading.Lock()
 _metrics: Dict[str, Dict[str, Deque[Dict[str, Any]]]] = defaultdict(
@@ -47,44 +50,58 @@ def _store(thread:str, kind:str, data:Dict[str,Any])->None:
     with _metrics_lock: _metrics[thread][kind].append(data)
 
 ##############################################################################
-# -- streaming client --------------------------------------------------------
+# ---------------------------  Streaming client  ----------------------------
 class StreamClient(threading.Thread):
-    def __init__(self, host="127.0.0.1", port=9500, retry=5):
-        super().__init__(daemon=True); self.h,self.p,self.r=host,port,retry
+    def __init__(self, host:str, port:int, retry:int=5):
+        super().__init__(daemon=True); self.host,self.port,self.retry=host,port,retry
     def run(self):
         while True:
             try: self._once()
             except Exception as e: print("[Stream]",e)
-            time.sleep(self.r)
+            time.sleep(self.retry)
     def _once(self):
-        with socket.create_connection((self.h,self.p),10) as s:
+        with socket.create_connection((self.host,self.port),10) as s:
             f=s.makefile("r",encoding="ascii",newline="\n")
             s.sendall(b"list stream all\n"); f.readline()
             for line in f:
-                if not line.strip(): continue
-                self._parse(line.rstrip("\n"))
+                if line.strip(): self._parse(line.rstrip("\n"))
     def _parse(self,line:str):
         if (m:=_RX_ANT_RE.match(line)):
             _store(m["thread"],"RX_ANT",{
-                "ts":int(m["ts"]),"freq":int(m["freq"]),"mcs":int(m["mcs"]),"bw":int(m["bw"]),
-                "antenna_id":f"0x{int(m['ant'],16):016x}","packet_count":int(m["count"]),
+                "ts":int(m["ts"]),"freq":int(m["freq"]),"mcs":int(m["mcs"]),
+                "bw":int(m["bw"]),"antenna_id":f"0x{int(m['ant'],16):016x}",
+                "packet_count":int(m["count"]),
                 "rssi":{k:int(m[k]) for k in ("rssi_min","rssi_avg","rssi_max")},
-                "snr": {k:int(m[k]) for k in ("snr_min","snr_avg","snr_max")}})
-            return
+                "snr": {k:int(m[k]) for k in ("snr_min","snr_avg","snr_max")}
+            }); return
         if (m:=_TX_ANT_RE.match(line)):
             _store(m["thread"],"TX_ANT",{
                 "ts":int(m["ts"]),"antenna_id":f"0x{int(m['ant'],16):016x}",
                 "pkt_injected":int(m["p_inj"]),"pkt_dropped":int(m["p_drop"]),
-                "latency":{k:int(m[k]) for k in ("lat_min","lat_avg","lat_max")}})
-            return
+                "latency":{k:int(m[k]) for k in ("lat_min","lat_avg","lat_max")}
+            }); return
         if (m:=_PKT_RE.match(line)):
             vals=list(map(int,m["vals"].split(":")))
-            if len(vals)==11: _store(m["thread"],"PKT",
-                       {"ts":int(m["ts"]),**dict(zip(PKT_FIELDS,vals))})
+            if len(vals)==11:_store(m["thread"],"PKT",
+                {"ts":int(m["ts"]),**dict(zip(PKT_FIELDS,vals))})
 
 ##############################################################################
-# -- Flask UI ----------------------------------------------------------------
-def create_app()->Flask:
+# ------------------  One-shot command helpers  -----------------------------
+def tm_request(host:str, port:int, cmd:str)->str:
+    """Send command, return first line (or error)."""
+    try:
+        with socket.create_connection((host,port),5) as s:
+            s.sendall((cmd+"\n").encode())
+            return s.recv(4096).decode(errors='ignore').strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+def list_commands(host,port):
+    out = tm_request(host,port,"list commands")
+    return [line for line in out.splitlines() if line]
+
+##############################################################################
+# ---------------------------  Flask app  -----------------------------------
+def create_app(host:str, port:int)->Flask:
     app=Flask(__name__)
 
     @app.route("/metrics")
@@ -92,14 +109,25 @@ def create_app()->Flask:
         with _metrics_lock:
             return jsonify({t:{k:list(d) for k,d in v.items()} for t,v in _metrics.items()})
 
-    INDEX_HTML=r"""
+    @app.route("/commands")
+    def commands_api()->Response:
+        return jsonify(list_commands(host,port))
+
+    @app.route("/exec", methods=["POST"])
+    def exec_api()->Response:
+        cmd=request.json.get("cmd")
+        if not cmd: abort(400)
+        return jsonify({"output": tm_request(host,port,f"exec {cmd}")})
+
+    # ---------------------------  HTML / JS  ------------------------------
+    INDEX_HTML = r"""
 <!doctype html><html lang=en><head>
 <meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Thread-Manager</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>:root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-header{background:var(--accent);color:#fff;display:flex;justify-content:space-between;align-items:center;padding:.7rem 1rem}
-header h1{margin:0;font-size:1rem}button#mode{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
+header{background:var(--accent);color:#fff;display:flex;gap:.5rem;align-items:center;padding:.7rem 1rem;font-size:1rem}
+header h1{margin:0;font-size:1rem}button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
 .tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
 .tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
 .tab.active{background:#fff;border-bottom:3px solid var(--accent)}
@@ -108,94 +136,134 @@ section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block
 .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.3rem 0;padding:.4rem .6rem}
 .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
 canvas{width:100%!important;height:240px!important}@media(max-width:600px){canvas{height:160px!important}}
+.cmd-btn{width:100%;margin:.25rem 0;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer}
+#cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
 </style></head><body>
-<header><h1>Thread-Manager Live Metrics</h1><button id=mode>GRAPHS</button></header>
-<div class=tabs><button class="tab active" data-tab=rx>RX</button><button class=tab data-tab=tx>TX</button></div>
-<section id=rx class="tab-content active"></section><section id=tx class="tab-content"></section>
+<header><h1>Thread-Manager</h1>
+  <button id=mode class=btn>STATS</button>
+  <button id=cmdToggle class=btn>COMMANDS</button>
+</header>
+
+<div id=metrics>
+  <div class=tabs><button class="tab active" data-tab=rx>RX</button><button class=tab data-tab=tx>TX</button></div>
+  <section id=rx class="tab-content active"></section><section id=tx class="tab-content"></section>
+</div>
+
+<section id=commands style="display:none"></section>
 
 <script>
-/* ---------- UI ---------- */
+/* ---------- helpers & colours ---------------- */
+const MAX=100;
+const colour=id=>`hsl(${parseInt(id.slice(-4),16)%360} 65% 55%)`;
+const charts=new Map(), wrappers=new Map();
+const ckey=(tab,thr)=>`${tab}:${thr}`;
+
+/* ---------- view state ----------------------- */
+let metricsMode='graphs';                 // default!
+let view='metrics';
+const modeBtn=document.getElementById('mode');
+const cmdBtn=document.getElementById('cmdToggle');
+modeBtn.textContent='STATS';              // button shows *other* mode
+
+modeBtn.addEventListener('click', () => {
+  if(view==='commands'){toggleCommands(false);}
+  metricsMode = metricsMode==='stats' ? 'graphs' : 'stats';
+  modeBtn.textContent = metricsMode==='stats' ? 'GRAPHS' : 'STATS';
+  refresh();
+});
+cmdBtn.addEventListener('click', () => toggleCommands(view!=='commands'));
+
+function toggleCommands(enable){
+  if(enable){
+    view='commands';
+    document.getElementById('metrics').style.display='none';
+    document.getElementById('commands').style.display='';
+    if(!document.getElementById('commands').hasChildNodes()) loadCommands();
+  }else{
+    view='metrics';
+    document.getElementById('metrics').style.display='';
+    document.getElementById('commands').style.display='none';
+  }
+}
+
+/* ---------- tab switching  ------------------- */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));
   document.querySelectorAll('.tab-content').forEach(s=>s.classList.toggle('active',s.id===b.dataset.tab));
 });
-let showGraphs = true;
-const modeBtn = document.getElementById('mode');   /* <-- add this line */
-modeBtn.addEventListener('click', e => {
-    showGraphs = !showGraphs;
-    e.target.textContent = showGraphs ? 'STATS' : 'GRAPHS';
-    refresh();          // redraw immediately
-});
 
-/* ---------- helpers ---------- */
-const MAX=100;
-const colour=id=>`hsl(${parseInt(id.slice(-4),16)%360} 65% 55%)`;
-const charts=new Map();                       // key -> Chart
-const wrappers=new Map();                     // key -> wrapper <div>
-const ckey=(tab,thr)=>`${tab}:${thr}`;
-
-/* ---------- main loop ---------- */
-setInterval(refresh,1000); refresh();
+/* ---------- metrics loop  -------------------- */
+setInterval(()=>{ if(view==='metrics') refresh(); },1000);
 async function refresh(){
   const r=await fetch('/metrics'); if(!r.ok) return;
   const data=await r.json();
-  draw('rx',data,'RX_ANT',s=>s.rssi.rssi_avg);
-  draw('tx',data,'TX_ANT',s=>s.latency.lat_avg);
+  drawTab('rx',data,'RX_ANT',s=>s.rssi.rssi_avg);
+  drawTab('tx',data,'TX_ANT',s=>s.latency.lat_avg);
 }
-
-/* ---------- draw one tab ---------- */
-function draw(tabId,data,type,ySel){
+function drawTab(tabId,data,type,ySel){
   const cont=document.getElementById(tabId);
-
-  /* TEXT MODE */
-  if(!showGraphs){
+  if(metricsMode==='stats'){
     cont.innerHTML='';
     [...charts.keys()].filter(k=>k.startsWith(tabId)).forEach(k=>{charts.get(k).destroy();charts.delete(k);wrappers.delete(k);});
     let html='';
     for(const [thr,k] of Object.entries(data)){
-      if(k[type]?.length){
-        html+=`<div class=thread>${thr}</div><div class=card>${type}\n${JSON.stringify(k[type].at(-1),null,2)}</div>`;
-        if(k.PKT?.length) html+=`<div class=card>PKT\n${JSON.stringify(k.PKT.at(-1),null,2)}</div>`;
-      }
+      if(!k[type]?.length) continue;
+      html+=`<div class=thread>${thr}</div><div class=card>${type}\n${JSON.stringify(k[type].at(-1),null,2)}</div>`;
+      if(k.PKT?.length) html+=`<div class=card>PKT\n${JSON.stringify(k.PKT.at(-1),null,2)}</div>`;
     }
-    cont.innerHTML=html||'<p>No data…</p>'; return;
+    cont.innerHTML=html||'<p>No data…</p>';
+    return;
   }
-
-  /* GRAPH MODE */
-  cont.querySelectorAll('.thread, .card').forEach(el => el.remove());  // <─ NEW
+  /* ----------- GRAPH mode ------------ */
+  cont.querySelectorAll('.thread,.card').forEach(el=>el.remove());
   for(const [thr,k] of Object.entries(data)){
     if(!k[type]?.length) continue;
-
     const id=ckey(tabId,thr);
-    /* create wrapper + canvas once */
     if(!wrappers.has(id)){
       const div=document.createElement('div');div.className='chart';
       div.innerHTML=`<div class=thread>${thr}</div><canvas></canvas>`;
-      cont.appendChild(div); wrappers.set(id,div);
+      cont.appendChild(div);wrappers.set(id,div);
       const ctx=div.querySelector('canvas');
       charts.set(id,new Chart(ctx,{type:'line',
         data:{labels:[...Array(MAX).keys()],datasets:[]},
         options:{animation:false,responsive:true,maintainAspectRatio:false,
-                 spanGaps:true,                                /* <── NEW */
+                 spanGaps:true,
                  scales:{x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}}},
                  plugins:{legend:{display:true,position:'bottom'}}}}));
     }
     const chart=charts.get(id);
-
-    /* group by antenna */
     const per={}; for(const s of k[type]){(per[s.antenna_id]??=[]).push(ySel(s));}
-
-    /* sync datasets */
     chart.data.datasets = Object.entries(per).map(([lab,vals])=>{
-      let ds = chart.data.datasets.find(d=>d.label===lab);
+      let ds=chart.data.datasets.find(d=>d.label===lab);
       if(!ds) ds={label:lab,borderColor:colour(lab),backgroundColor:colour(lab),
                   tension:0,fill:false,data:Array(MAX).fill(null)};
-      /* append newest single value */
       ds.data.push(vals.at(-1)); if(ds.data.length>MAX) ds.data.shift();
       return ds;
     });
     chart.update('none');
   }
+}
+
+/* ---------- COMMANDS pane  --------------- */
+async function loadCommands(){
+  const sec=document.getElementById('commands');
+  sec.innerHTML='<p>Loading…</p>';
+  try{
+    const resp=await fetch('/commands'); if(!resp.ok) throw resp.status;
+    const cmds=await resp.json();
+    let html=''; cmds.forEach(c=>html+=`<button class=cmd-btn data-cmd="${c}">${c}</button>`);
+    html+=`<div id=cmd-out></div>`; sec.innerHTML=html;
+    sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=execCmd);
+  }catch(e){sec.innerHTML=`<p style="color:red">ERROR ${e}</p>`;}
+}
+async function execCmd(e){
+  const btn=e.target, cmd=btn.dataset.cmd; btn.disabled=true;
+  const out=document.getElementById('cmd-out'); out.textContent='…';
+  try{
+    const r=await fetch('/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
+    const j=await r.json(); out.textContent=j.output;
+  }catch(err){out.textContent='ERROR '+err;}
+  btn.disabled=false;
 }
 </script></body></html>
 """
@@ -206,10 +274,11 @@ function draw(tabId,data,type,ySel){
 ##############################################################################
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=9500)
+    p.add_argument("--host",default="192.168.2.20")
+    p.add_argument("--port",type=int,default=9500)
     p.add_argument("--web-port",type=int,default=5000)
     a=p.parse_args()
     StreamClient(a.host,a.port).start()
-    create_app().run(host="0.0.0.0",port=a.web_port,threaded=True)
+    create_app(a.host,a.port).run(host="0.0.0.0",port=a.web_port,threaded=True)
 
 if __name__=="__main__": main()
