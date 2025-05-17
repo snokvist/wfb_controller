@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Thread-Manager Live Monitor + One-Shot Commands  (v4.4)
+Thread-Manager Live Monitor + One-Shot Commands  (v4.5)
 
-Adds:
-  • visible chart headers
-  • unique colours per chart
-  • integer Y-axes
-  • no point markers
+* Default GRAPHS view (100-sample strip, fixed legend order)
+* ANTENNA / ERRORS / THROUGHPUT charts per thread
+* Chart headers now show *thread – title* (e.g. “tun_agg_rx – ERRORS”)
+* Unique colours per chart, integer Y-axes, no markers
+* Live Mbps totals, refresh-rate toggle, commands pane
 """
 import argparse, socket, threading, time, re
 from collections import defaultdict, deque
 from typing import Dict, Deque, Any
 from flask import Flask, jsonify, request, Response, abort
 
-# ───────────────── regex helpers ─────────────────
+# ─────────── regex helpers ────────────
 _RX_ANT_RE = re.compile(
     r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+RX_ANT\s+"
     r"(?P<freq>\d+):(?P<mcs>\d+):(?P<bw>\d+)\s+"
     r"(?P<ant>[0-9a-fA-F]+)\s+"
     r"(?P<count>\d+):(?P<rssi_min>-?\d+):(?P<rssi_avg>-?\d+):(?P<rssi_max>-?\d+):"
-    r"(?P<snr_min>-?\d+):(?P<snr_avg>-?\d+):(?P<snr_max>-?\d+)")
+    r"(?P<snr_min>-?\d+):(?P<snr_avg>-?\d+):(?P<snr_max>-?\d+)"
+)
 _TX_ANT_RE = re.compile(
     r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+TX_ANT\s+"
     r"(?P<ant>[0-9a-fA-F]+)\s+"
     r"(?P<p_inj>\d+):(?P<p_drop>\d+):"
-    r"(?P<lat_min>\d+):(?P<lat_avg>\d+):(?P<lat_max>\d+)")
+    r"(?P<lat_min>\d+):(?P<lat_avg>\d+):(?P<lat_max>\d+)"
+)
 _PKT_RE = re.compile(
     r"^(?P<thread>[\w\-]+):(?P<ts>\d+)\s+PKT\s+"
-    r"(?P<vals>(?:\d+:){10}\d+)$")
+    r"(?P<vals>(?:\d+:){10}\d+)$"
+)
 PKT_FIELDS = [
     "count_p_all","count_b_all","count_p_dec_err",
     "count_p_session","count_p_data","count_p_uniq",
@@ -35,7 +38,7 @@ PKT_FIELDS = [
     "count_p_outgoing","count_b_outgoing",
 ]
 
-# ───────────── in-memory store ─────────────
+# ─────────── in-memory store ──────────
 BUFFER = 200
 _metrics_lock = threading.Lock()
 _metrics: Dict[str, Dict[str, Deque[Dict[str, Any]]]] = defaultdict(
@@ -43,11 +46,11 @@ _metrics: Dict[str, Dict[str, Deque[Dict[str, Any]]]] = defaultdict(
              "TX_ANT": deque(maxlen=BUFFER),
              "PKT":    deque(maxlen=BUFFER)}
 )
-def _store(thread:str, kind:str, data:Dict[str,Any]):  # noqa
+def _store(thread:str, kind:str, data:Dict[str,Any]) -> None:
     with _metrics_lock:
         _metrics[thread][kind].append(data)
 
-# ───────────── streaming client ────────────
+# ─────────── streaming client ─────────
 class StreamClient(threading.Thread):
     def __init__(self, host:str, port:int, retry:int=5):
         super().__init__(daemon=True)
@@ -55,7 +58,7 @@ class StreamClient(threading.Thread):
     def run(self):
         while True:
             try: self._once()
-            except Exception as e:  print("[Stream]",e)
+            except Exception as e: print("[Stream]",e)
             time.sleep(self.r)
     def _once(self):
         with socket.create_connection((self.h,self.p),10) as s:
@@ -66,24 +69,28 @@ class StreamClient(threading.Thread):
     def _parse(self,line:str):
         if (m:=_RX_ANT_RE.match(line)):
             _store(m["thread"],"RX_ANT",{
-                "ts":int(m["ts"]),"freq":int(m["freq"]),"mcs":int(m["mcs"]),
-                "bw":int(m["bw"]),"antenna_id":f"0x{int(m['ant'],16):016x}",
+                "ts":int(m["ts"]),
+                "freq":int(m["freq"]),"mcs":int(m["mcs"]),"bw":int(m["bw"]),
+                "antenna_id":f"0x{int(m['ant'],16):016x}",
                 "packet_count":int(m["count"]),
                 "rssi":{k:int(m[k]) for k in ("rssi_min","rssi_avg","rssi_max")},
-                "snr": {k:int(m[k]) for k in ("snr_min","snr_avg","snr_max")}})
-            return
+                "snr": {k:int(m[k]) for k in ("snr_min","snr_avg","snr_max")}
+            }); return
         if (m:=_TX_ANT_RE.match(line)):
             _store(m["thread"],"TX_ANT",{
-                "ts":int(m["ts"]),"antenna_id":f"0x{int(m['ant'],16):016x}",
-                "pkt_injected":int(m["p_inj"]),"pkt_dropped":int(m["p_drop"]),
-                "latency":{k:int(m[k]) for k in ("lat_min","lat_avg","lat_max")}})
-            return
+                "ts":int(m["ts"]),
+                "antenna_id":f"0x{int(m['ant'],16):016x}",
+                "pkt_injected":int(m["p_inj"]),
+                "pkt_dropped": int(m["p_drop"]),
+                "latency":{k:int(m[k]) for k in ("lat_min","lat_avg","lat_max")}
+            }); return
         if (m:=_PKT_RE.match(line)):
             vals=list(map(int,m["vals"].split(":")))
             if len(vals)==11:
-                _store(m["thread"],"PKT",{"ts":int(m["ts"]),**dict(zip(PKT_FIELDS,vals))})
+                _store(m["thread"],"PKT",
+                       {"ts":int(m["ts"]),**dict(zip(PKT_FIELDS,vals))})
 
-# ───────── one-shot command helpers ────────
+# ── one-shot command helpers ──
 def tm_request(host:str,port:int,cmd:str)->str:
     try:
         with socket.create_connection((host,port),5) as s:
@@ -93,8 +100,8 @@ def tm_request(host:str,port:int,cmd:str)->str:
 def list_commands(host,port):
     return [l for l in tm_request(host,port,"list commands").splitlines() if l]
 
-# ───────────────── flask app ───────────────
-def create_app(host:str, port:int)->Flask:
+# ───────────── flask app ─────────────
+def create_app(host:str, port:int) -> Flask:
     app=Flask(__name__)
 
     @app.route("/metrics")
@@ -108,11 +115,11 @@ def create_app(host:str, port:int)->Flask:
 
     @app.route("/exec", methods=["POST"])
     def exec_api() -> Response:
-        cmd=request.json.get("cmd");  # validation
+        cmd=request.json.get("cmd")
         if not cmd: abort(400)
         return jsonify({"output": tm_request(host,port,f"exec {cmd}")})
 
-    # ------------- HTML / JS -------------
+    # ---------------- HTML / JS ----------------
     INDEX_HTML = r"""
 <!doctype html><html lang=en><head>
 <meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
@@ -176,37 +183,51 @@ async function refresh(){
 }
 function drawTab(tabId,data,antKey,ySel){
   const cont=document.getElementById(tabId);
-  if(mode==='stats'){cont.innerHTML='';[...charts.keys()].filter(k=>k.startsWith(tabId)).forEach(k=>{charts.get(k).destroy();charts.delete(k);wrappers.delete(k);});
-    let html='';for(const[thr,k]of Object.entries(data)){if(!k[antKey]?.length)continue;html+=`<div class=thread>${thr}</div><div class=card>${antKey}\n${JSON.stringify(k[antKey].at(-1),null,2)}</div>`;if(k.PKT?.length)html+=`<div class=card>PKT\n${JSON.stringify(k.PKT.at(-1),null,2)}</div>`;}cont.innerHTML=html||'<p>No data…</p>';return;}
+  if(mode==='stats'){
+    cont.innerHTML='';[...charts.keys()].filter(k=>k.startsWith(tabId)).forEach(k=>{charts.get(k).destroy();charts.delete(k);wrappers.delete(k);});
+    let html='';for(const[thr,kinds]of Object.entries(data)){if(!kinds[antKey]?.length)continue;
+      html+=`<div class=thread>${thr}</div><div class=card>${antKey}\n${JSON.stringify(kinds[antKey].at(-1),null,2)}</div>`;
+      if(kinds.PKT?.length)html+=`<div class=card>PKT\n${JSON.stringify(kinds.PKT.at(-1),null,2)}</div>`;}
+    cont.innerHTML=html||'<p>No data…</p>';return;}
   cont.querySelectorAll('.thread,.card').forEach(el=>el.remove());
-  for(const[thr,k]of Object.entries(data)){if(!k[antKey]?.length)continue;
-    renderStrip(tabId,thr,'ant','ANTENNA',k[antKey],s=>s.antenna_id,v=>v.at(-1),ySel);
-    if(k.PKT?.length){renderStrip(tabId,thr,'err','ERRORS',[k.PKT.at(-1)],()=>1,p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),null,{min:0},ERR_KEYS);
-      renderStrip(tabId,thr,'thr','THROUGHPUT',[k.PKT.at(-1)],()=>1,p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),null,{min:0},THR_KEYS);}}}
-/* generic strip -------------------------- */
+  for(const[thr,kinds]of Object.entries(data)){
+    if(!kinds[antKey]?.length)continue;
+    renderStrip(tabId,thr,'ant',`${thr} – ANTENNA`,kinds[antKey],s=>s.antenna_id,v=>v.at(-1),ySel);
+    if(kinds.PKT?.length){
+      renderStrip(tabId,thr,'err',`${thr} – ERRORS`,[kinds.PKT.at(-1)],()=>1,p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),null,{min:0},ERR_KEYS);
+      renderStrip(tabId,thr,'thr',`${thr} – THROUGHPUT`,[kinds.PKT.at(-1)],()=>1,p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),null,{min:0},THR_KEYS);}}
+}
+/* generic strip ------------------------ */
 function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
   const id=ckey(tab,thr,sfx);let wrap=wrappers.get(id);
-  if(!wrap){wrap=document.createElement('div');wrap.className='chart';
+  if(!wrap){
+    wrap=document.createElement('div');wrap.className='chart';
     wrap.innerHTML=`<div class=chart-title>${title}</div><canvas></canvas>`;
-    document.getElementById(tab).appendChild(wrap);const ctx=wrap.querySelector('canvas');
+    document.getElementById(tab).appendChild(wrap);
+    const ctx=wrap.querySelector('canvas');
     charts.set(id,new Chart(ctx,{type:'line',data:{labels:[...Array(MAX).keys()],datasets:[]},
       options:{animation:false,responsive:true,maintainAspectRatio:false,spanGaps:true,
-               elements:{point:{radius:0}},                                       // no dots
+               elements:{point:{radius:0}},
                scales:{x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}},
                        y:{beginAtZero:true,ticks:{precision:0,callback:v=>v},...yExtra}},
-               plugins:{legend:{display:true,position:'bottom'}}}}));wrappers.set(id,wrap);}
+               plugins:{legend:{display:true,position:'bottom'}}}}));
+    wrappers.set(id,wrap);}
   const chart=charts.get(id);
-  let dSets=[];
-  if(sfx==='ant'){const groups={};samples.forEach(s=>(groups[keyFn(s)]??=[]).push(ySel(s)));
-    Object.keys(groups).sort().forEach((lab,i)=>{let ds=chart.data.datasets.find(d=>d.label===lab);
-      if(!ds)ds={label:lab,borderColor:colour(i),backgroundColor:colour(i),tension:0,fill:false,data:Array(MAX).fill(null)};
-      ds.data.push(valFn(groups[lab]));if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);});}
-  else{const obj=valFn(samples.at(-1));(fixedOrder||Object.keys(obj).sort()).forEach((lab,i)=>{let ds=chart.data.datasets.find(d=>d.label===lab);
-      if(!ds)ds={label:lab,borderColor:colour(i),backgroundColor:colour(i),tension:0,fill:false,data:Array(MAX).fill(null)};
-      ds.data.push(obj[lab]);if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);});}
+  let dSets=[], index=0;
+  if(sfx==='ant'){
+    const groups={};samples.forEach(s=>(groups[keyFn(s)]??=[]).push(ySel(s)));
+    Object.keys(groups).sort().forEach(lab=>{let ds=chart.data.datasets.find(d=>d.label===lab);
+      if(!ds)ds={label:lab,borderColor:colour(index),backgroundColor:colour(index),tension:0,fill:false,data:Array(MAX).fill(null)};
+      ds.data.push(valFn(groups[lab]));if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);index++;});
+  }else{
+    const obj=valFn(samples.at(-1));(fixedOrder||Object.keys(obj).sort()).forEach(lab=>{let ds=chart.data.datasets.find(d=>d.label===lab);
+      if(!ds)ds={label:lab,borderColor:colour(index),backgroundColor:colour(index),tension:0,fill:false,data:Array(MAX).fill(null)};
+      ds.data.push(obj[lab]);if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);index++;});
+  }
   chart.data.datasets=dSets;chart.update('none');
 }
-/* ------------ COMMANDS ------------- */
+
+/* ---------- COMMANDS ------------- */
 async function loadCmd(){const sec=document.getElementById('commands');sec.innerHTML='<p>Loading…</p>';
   try{const cmds=await(await fetch('/commands')).json();let h='';cmds.forEach(c=>h+=`<button class=cmd-btn data-cmd="${c}">${c}</button>`);h+='<div id=cmd-out></div>';sec.innerHTML=h;sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=exec);}
   catch(e){sec.innerHTML=`<p style="color:red">ERROR ${e}</p>`;}}
@@ -220,7 +241,7 @@ async function exec(e){const b=e.target,cmd=b.dataset.cmd;b.disabled=true;const 
         return INDEX_HTML
     return app
 
-# ─────────────────── main ───────────────────
+# ───────── main ─────────
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("--host",default="192.168.2.20")
@@ -229,4 +250,6 @@ def main():
     a=p.parse_args()
     StreamClient(a.host,a.port).start()
     create_app(a.host,a.port).run(host="0.0.0.0",port=a.web_port,threaded=True)
-if __name__=="__main__": main()
+
+if __name__=="__main__":
+    main()
