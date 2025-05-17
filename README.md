@@ -5,6 +5,7 @@
 
 gcc -O2 -o udp_relay_manager udp_relay_manager.c -pthread
 
+./udp_relay_manager --bind 5801 --bind 5803
 
 echo "set 5801 127.0.0.1 6001" | nc 127.0.0.1 9000
 
