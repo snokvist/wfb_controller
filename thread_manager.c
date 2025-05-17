@@ -34,6 +34,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <boost/beast/core/detail/base64.hpp> 
 
 using namespace std::chrono_literals;
 namespace fs   = std::filesystem;
@@ -145,8 +146,7 @@ public:
             namespace bp  = boost::process;
             using boost::asio::buffer;
             child_ = std::make_unique<bp::child>(
-                bp::shell                              // honour shell quoting
-                    (cmdline_),
+                bp::search_path("sh"), "-c", cmdline_,
                 bp::std_out > out_, bp::std_err > err_);
         }
         catch (const boost::process::process_error& e) {
@@ -481,7 +481,8 @@ private:
             if (!cmline) { send("ERR No such command\n"); return; }
             try {
                 bp::ipstream is;
-                bp::child c(bp::shell(*cmline), bp::std_out > is);
+                bp::child c(bp::search_path("sh"), "-c", *cmline,  // ← replace this line
+                bp::std_out > is);
                 std::string out;
                 std::string line;
                 while (std::getline(is, line))
