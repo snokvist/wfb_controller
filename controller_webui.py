@@ -119,8 +119,13 @@ document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));
   document.querySelectorAll('.tab-content').forEach(s=>s.classList.toggle('active',s.id===b.dataset.tab));
 });
-let showGraphs=true; const mode=document.getElementById('mode');
-mode.onclick=()=>{showGraphs=!showGraphs;mode.textContent=showGraphs?'STATS':'GRAPHS';};
+let showGraphs = true;
+const modeBtn = document.getElementById('mode');   /* <-- add this line */
+modeBtn.addEventListener('click', e => {
+    showGraphs = !showGraphs;
+    e.target.textContent = showGraphs ? 'STATS' : 'GRAPHS';
+    refresh();          // redraw immediately
+});
 
 /* ---------- helpers ---------- */
 const MAX=100;
@@ -157,6 +162,7 @@ function draw(tabId,data,type,ySel){
   }
 
   /* GRAPH MODE */
+  cont.querySelectorAll('.thread, .card').forEach(el => el.remove());  // <─ NEW
   for(const [thr,k] of Object.entries(data)){
     if(!k[type]?.length) continue;
 
