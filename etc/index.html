@@ -15,9 +15,14 @@ section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block
 .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
 .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
 canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
-.cmd-btn{width:100%;margin:.25rem 0;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer}
+.cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
 #cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
-</style></head><body>
+.collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background 0.2s;padding:.25rem;border-radius:4px}
+.collapsible-title:hover{background:#d0e4ff}
+.collapsible-body{overflow:hidden;transition:max-height 0.3s ease-out;margin-top:.5rem;max-height:1000px}
+.collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
+.collapsible.collapsed .collapsible-title::after{content:' [+]'}
+.collapsible-title::after{content:' [\2013]';float:right}</style></head><body>
 <header><h1>Thread-Manager</h1>
   <button id=mode  class=btn>STATS</button>
   <button id=refresh class=btn>REF 1000ms</button>
@@ -32,7 +37,6 @@ canvas{width:100%!important;height:220px!important}@media(max-width:600px){canva
 <section id=commands style="display:none"></section>
 
 <script>
-/* ---------- helpers & constants ---------- */
 const MAX=100;
 const pool=['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
 const colour=i=>pool[i%pool.length];
@@ -40,7 +44,6 @@ const charts=new Map(), wrappers=new Map();
 const ckey=(tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
 const ERR_KEYS=['bad','lost','rec','dec'], THR_KEYS=['all','out','uniq'];
 
-/* ---------- view & refresh --------------- */
 let mode='graphs', view='metrics';
 const ints=[200,400,600,800,1000]; let idx=4; let timer;
 const modeBtn=document.getElementById('mode'), refBtn=document.getElementById('refresh'), bytesLine=document.getElementById('bytesline');
@@ -51,13 +54,13 @@ function toggleCmd(en){if(en){view='commands';metrics.style.display='none';comma
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));document.querySelectorAll('.tab-content').forEach(s=>s.classList.toggle('active',s.id===b.dataset.tab));});
 function sched(){clearTimeout(timer);if(view==='metrics')refresh();timer=setTimeout(sched,ints[idx]);}sched();
 
-/* ---------- metrics update --------------- */
 async function refresh(){
   const r=await fetch('/metrics'); if(!r.ok)return; const data=await r.json();
   let inB=0,outB=0;Object.values(data).forEach(t=>{const p=t.PKT.at(-1);if(p){inB+=p.count_b_all;outB+=p.count_b_outgoing;}});
   bytesLine.textContent=`Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
   drawTab('rx',data,'RX_ANT',s=>s.rssi.rssi_avg); drawTab('tx',data,'TX_ANT',s=>s.latency.lat_avg);
 }
+
 function drawTab(tabId,data,antKey,ySel){
   const cont=document.getElementById(tabId);
   if(mode==='stats'){
@@ -74,7 +77,7 @@ function drawTab(tabId,data,antKey,ySel){
       renderStrip(tabId,thr,'err',`${thr} – ERRORS`,[kinds.PKT.at(-1)],()=>1,p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),null,{min:0},ERR_KEYS);
       renderStrip(tabId,thr,'thr',`${thr} – THROUGHPUT`,[kinds.PKT.at(-1)],()=>1,p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),null,{min:0},THR_KEYS);}}
 }
-/* generic strip ------------------------ */
+
 function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
   const id=ckey(tab,thr,sfx);let wrap=wrappers.get(id);
   if(!wrap){
@@ -104,11 +107,53 @@ function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedO
   chart.data.datasets=dSets;chart.update('none');
 }
 
-/* ---------- COMMANDS ------------- */
-async function loadCmd(){const sec=document.getElementById('commands');sec.innerHTML='<p>Loading…</p>';
-  try{const cmds=await(await fetch('/commands')).json();let h='';cmds.forEach(c=>h+=`<button class=cmd-btn data-cmd="${c}">${c}</button>`);h+='<div id=cmd-out></div>';sec.innerHTML=h;sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=exec);}
-  catch(e){sec.innerHTML=`<p style="color:red">ERROR ${e}</p>`;}}
-async function exec(e){const b=e.target,cmd=b.dataset.cmd;b.disabled=true;const out=document.getElementById('cmd-out');out.textContent='…';
-  try{const j=await(await fetch('/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})})).json();out.textContent=j.output;}
-  catch(err){out.textContent='ERROR '+err;}b.disabled=false;}
+async function loadCmd(){
+  const sec=document.getElementById('commands');
+  sec.innerHTML='<p>Loading…</p>';
+  try{
+    const cmds = await (await fetch('/commands')).json();
+    const groups = { settings: [], gs: [], vtx: [], other: [] };
+    cmds.forEach(cmd => {
+      if(cmd.startsWith('settings_')) groups.settings.push(cmd);
+      else if(cmd.startsWith('gs_')) groups.gs.push(cmd);
+      else if(cmd.startsWith('vtx_')) groups.vtx.push(cmd);
+      else groups.other.push(cmd);
+    });
+    function makeBlock(title, list) {
+      if (!list.length) return '';
+      const btns = list.map(c=>`<button class=cmd-btn data-cmd="${c}">${c}</button>`).join('');
+      return `
+        <div class="card collapsible collapsed">
+          <div class="collapsible-title">${title}</div>
+          <div class="collapsible-body">${btns}</div>
+        </div>`;
+    }
+    sec.innerHTML =
+      makeBlock('Settings', groups.settings) +
+      makeBlock('Groundstation', groups.gs) +
+      makeBlock('VTX', groups.vtx) +
+      makeBlock('Other', groups.other) +
+      '<div id=cmd-out></div>';
+    sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=exec);
+    sec.querySelectorAll('.collapsible-title').forEach(t =>
+      t.onclick = () => t.parentElement.classList.toggle('collapsed')
+    );
+  } catch(e){
+    sec.innerHTML = `<p style="color:red">ERROR ${e}</p>`;
+  }
+}
+
+async function exec(e){
+  const b=e.target,cmd=b.dataset.cmd;
+  b.disabled=true;
+  const out=document.getElementById('cmd-out');
+  out.textContent='…';
+  try{
+    const j=await(await fetch('/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})})).json();
+    out.textContent=j.output;
+  } catch(err){
+    out.textContent='ERROR '+err;
+  }
+  b.disabled=false;
+}
 </script></body></html>
