@@ -9,9 +9,9 @@ and write a compact row to /run/pixelpilot.msg:
 import requests
 import time
 
-URL = "http://192.168.2.20:5010/metrics"
+URL = "http://127.0.0.1:5010/metrics"
 OUTPUT_FILE = "/run/pixelpilot.msg"
-SLEEP_INTERVAL = 1.5
+SLEEP_INTERVAL = 2
 
 def fetch_metrics():
     """Fetch JSON metrics from the server."""
