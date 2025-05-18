@@ -10,3 +10,6 @@ gcc -O2 -o udp_relay_manager udp_relay_manager.c -pthread
 echo "set 5801 127.0.0.1 6001" | nc 127.0.0.1 9000
 
 echo "status" | nc 127.0.0.1 9000
+
+
+./ant_selector.py --tx-antennas 7f000001000000,7f000001000001 --switch-cmd "printf 'exec select_{adapter}' | nc -N 127.0.0.1 9500"
