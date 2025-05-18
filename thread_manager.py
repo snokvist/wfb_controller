@@ -17,6 +17,8 @@ import argparse, base64, binascii, configparser, os, shlex, signal, socket
 import socketserver, subprocess, sys, threading, time
 from pathlib import Path
 from typing import Dict, Set, Tuple, List
+import errno
+import socketserver, socket, subprocess
 
 DEBUG_LINE_TEMPLATE = "RUN:{run} RST:{rst} TX:{tx} DROP:{drop}"
 MAX_CONNECTIONS, IDLE_TIMEOUT = 10, 60
@@ -160,80 +162,128 @@ class ThreadManager:
     def restarts_total(self):return sum(p.restarts for p in self.procs.values())
     def running_count(self): return sum(1 for p in self.procs.values() if p.is_running())
 
-# ──────────────────────────── TCP handler  (updates) ────────────────────────
+# ──────────────────────────── TCP handler  (updated) ────────────────────────
+
 class CommandHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        sock=self.request
-        if len(self.server.connections)>=MAX_CONNECTIONS:
-            sock.sendall(b"ERR Too many connections\n"); return
-        self.server.connections.add(sock); sock.settimeout(IDLE_TIMEOUT)
-        subs=None
+        sock = self.request
+        if len(self.server.connections) >= MAX_CONNECTIONS:
+            sock.sendall(b"ERR Too many connections\n")
+            return
+
+        self.server.connections.add(sock)
+        sock.settimeout(IDLE_TIMEOUT)
+        subs = None
+
         try:
             while not STOP_EVENT.is_set():
-                try: raw=sock.recv(1024)
+                try:
+                    raw = sock.recv(1024)
                 except socket.timeout:
-                    if subs: continue
+                    if subs:                 # keep streaming listeners alive
+                        continue
+                    break                    # idle control connection -> close
+                except OSError as e:          # <-- NEW graceful bailout
+                    if e.errno == errno.EBADF:   # peer already closed
+                        return                   # end handler silently
+                    raise                        # other error: propagate
+
+                if not raw:                    # orderly close by peer
                     break
-                if not raw: break
-                if subs and raw in {b"\n",b"\r\n",b"\r"}:
-                    Broadcaster.remove_listener(sock); subs=None; sock.sendall(b"STREAM stopped\n"); continue
-                line=raw.decode().strip()
-                if not line: continue
-                parts=line.split(); cmd=parts[0].lower()
 
-                if cmd=="help": sock.sendall(HELP_TEXT.encode()); continue
-
-                if cmd=="list":
-                    if len(parts)==1:
-                        sock.sendall("\n".join(TM.list_names()).encode()+b"\n")
-                    elif parts[1]=="status":
-                        sock.sendall(("\n".join(f"{k}: {v}" for k,v in TM.status().items())+"\n").encode())
-                    elif parts[1]=="info":
-                        sock.sendall(("\n".join(f"{k}: {v}" for k,v in TM.info().items())+"\n").encode())
-                    elif parts[1]=="commands":
-                        sock.sendall("\n".join(CS.list_names()).encode()+b"\n")
-                    elif len(parts)>2 and parts[1]=="stream" and parts[2]=="all":
-                        subs="ALL"; Broadcaster.add_listener(sock,"ALL"); sock.sendall(b"STREAM ALL\n")
-                    else: sock.sendall(b"ERR Unknown list subcommand\n")
+                # ----------------------------------------------------------------
+                # streaming stop token
+                if subs and raw in {b"\n", b"\r\n", b"\r"}:
+                    Broadcaster.remove_listener(sock)
+                    subs = None
+                    sock.sendall(b"STREAM stopped\n")
                     continue
 
-                if cmd in {"status","info"} and len(parts)==2:
-                    name=TM.name_from_token(parts[1])
-                    func=TM.status if cmd=="status" else TM.info
-                    k,v=next(iter(func(name).items())); sock.sendall(f"{k}: {v}\n".encode()); continue
+                line = raw.decode().strip()
+                if not line:
+                    continue
+                parts = line.split()
+                cmd = parts[0].lower()
 
-                if cmd=="stream" and len(parts)==3:
-                    token,spec=parts[1],parts[2]
-                    if spec not in {"stdout","stderr","all"}:
-                        token,spec = parts[2],parts[1]
-                    if spec not in {"stdout","stderr","all"}:
-                        sock.sendall(b"ERR stream <thread|index> <stdout|stderr|all>\n"); continue
-                    name=TM.name_from_token(token)
-                    if name not in TM.procs: sock.sendall(b"ERR No such thread\n"); continue
-                    subs={(name,"stdout"),(name,"stderr")} if spec=="all" else {(name,spec)}
-                    Broadcaster.add_listener(sock,subs)
-                    sock.sendall(f"STREAM {name} {spec}\n".encode()); continue
+                # ---------------- help ------------------------------------------
+                if cmd == "help":
+                    sock.sendall(HELP_TEXT.encode())
+                    continue
 
-                if cmd=="exec" and len(parts)==2:
-                    name=CS.name_from_token(parts[1])
-                    cmline=CS.get(name)
-                    if cmline is None: sock.sendall(b"ERR No such command\n"); continue
+                # ---------------- list ------------------------------------------
+                if cmd == "list":
+                    if len(parts) == 1:
+                        sock.sendall("\n".join(TM.list_names()).encode() + b"\n")
+                    elif parts[1] == "status":
+                        sock.sendall(("\n".join(f"{k}: {v}" for k, v in TM.status().items()) + "\n").encode())
+                    elif parts[1] == "info":
+                        sock.sendall(("\n".join(f"{k}: {v}" for k, v in TM.info().items()) + "\n").encode())
+                    elif parts[1] == "commands":
+                        sock.sendall("\n".join(CS.list_names()).encode() + b"\n")
+                    elif len(parts) > 2 and parts[1] == "stream" and parts[2] == "all":
+                        subs = "ALL"
+                        Broadcaster.add_listener(sock, "ALL")
+                        sock.sendall(b"STREAM ALL\n")
+                    else:
+                        sock.sendall(b"ERR Unknown list subcommand\n")
+                    continue
+
+                # -------------- status / info -----------------------------------
+                if cmd in {"status", "info"} and len(parts) == 2:
+                    name = TM.name_from_token(parts[1])
+                    func = TM.status if cmd == "status" else TM.info
+                    k, v = next(iter(func(name).items()))
+                    sock.sendall(f"{k}: {v}\n".encode())
+                    continue
+
+                # -------------- stream ------------------------------------------
+                if cmd == "stream" and len(parts) == 3:
+                    token, spec = parts[1], parts[2]
+                    if spec not in {"stdout", "stderr", "all"}:
+                        token, spec = parts[2], parts[1]
+                    if spec not in {"stdout", "stderr", "all"}:
+                        sock.sendall(b"ERR stream <thread|index> <stdout|stderr|all>\n")
+                        continue
+                    name = TM.name_from_token(token)
+                    if name not in TM.procs:
+                        sock.sendall(b"ERR No such thread\n")
+                        continue
+                    subs = {(name, "stdout"), (name, "stderr")} if spec == "all" else {(name, spec)}
+                    Broadcaster.add_listener(sock, subs)
+                    sock.sendall(f"STREAM {name} {spec}\n".encode())
+                    continue
+
+                # -------------- exec --------------------------------------------
+                if cmd == "exec" and len(parts) == 2:
+                    name = CS.name_from_token(parts[1])
+                    cmline = CS.get(name)
+                    if cmline is None:
+                        sock.sendall(b"ERR No such command\n")
+                        continue
                     try:
-                        res=subprocess.run(cmline,shell=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=10)
-                        output=res.stdout.rstrip()
-                        sock.sendall((output+"\n").encode() if output else b"")
+                        res = subprocess.run(cmline, shell=True,
+                                             stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT,
+                                             text=True, timeout=10)
+                        output = res.stdout.rstrip()
+                        if output:
+                            sock.sendall((output + "\n").encode())
                         sock.sendall(f"EXIT {res.returncode}\n".encode())
                     except Exception as e:
                         sock.sendall(f"ERR exec failed: {e}\n".encode())
                     continue
 
+                # -------------- unknown -----------------------------------------
                 sock.sendall(b"ERR Unknown command\n")
         finally:
             Broadcaster.remove_listener(sock)
             self.server.connections.discard(sock)
-            try: sock.shutdown(socket.SHUT_RDWR)
-            except Exception: pass
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             sock.close()
+
 
 # ───────────────────────────── TCP server class ─────────────────────────────
 class ThreadedTCPServer(socketserver.ThreadingMixIn,socketserver.TCPServer):
