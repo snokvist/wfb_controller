@@ -16,6 +16,12 @@ g++ -std=c++17 -O2 -pthread thread_manager.cpp \
     -lboost_system -lboost_thread -lboost_filesystem \
     -lboost_program_options -o thread_manager
 
+sudo apt install build-essential \
+    libboost-system-dev libboost-filesystem-dev \
+    libboost-thread-dev libboost-program-options-dev
+
+
+
 ''
     | Where you build                                                 | Recommended compiler      | Packages to install (Debian/Ubuntu examples)                                                                                                             | Typical command                                                                                                                                                                                           |
 | --------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
