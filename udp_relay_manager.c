@@ -1,11 +1,11 @@
 /*
  * UDP Relay Manager (C version)
  * Listens on multiple UDP ports, relays to configurable destinations.
- * Control via TCP socket (default port 9000):
+ * Control via TCP socket (default port 9000, or use --control-port <port>):
  *   set <SRC_PORT> <DST_IP> <DST_PORT>
  *   status
  *
- * Compile with: gcc -O2 -o udp_relay_manager udp_relay_manager.c
+ * Compile with: gcc -O2 -o udp_relay_manager udp_relay_manager.c -lpthread
  */
 
 #define _GNU_SOURCE
@@ -23,7 +23,7 @@
 #include <pthread.h>
 
 #define MAX_RELAYS 32
-#define CONTROL_PORT 9000
+#define DEFAULT_CONTROL_PORT 9000
 #define BUFSZ 2048
 
 struct relay {
@@ -36,6 +36,7 @@ struct relay {
 static struct relay relays[MAX_RELAYS];
 static int relay_count = 0;
 static pthread_mutex_t relay_lock = PTHREAD_MUTEX_INITIALIZER;
+static int control_port = DEFAULT_CONTROL_PORT;
 
 void *relay_thread(void *arg) {
     struct relay *r = (struct relay *)arg;
@@ -60,17 +61,26 @@ void *relay_thread(void *arg) {
 void *control_thread(void *arg) {
     (void)arg;
     int sock = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
-        .sin_port = htons(CONTROL_PORT)
+        .sin_port = htons(control_port)
     };
-    bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("control socket bind failed");
+        exit(1);
+    }
     listen(sock, 4);
 
     char buf[256];
     while (1) {
         int client = accept(sock, NULL, NULL);
+        if (client < 0) continue;
         ssize_t len = read(client, buf, sizeof(buf) - 1);
         if (len > 0) {
             buf[len] = 0;
@@ -116,13 +126,16 @@ void *control_thread(void *arg) {
 
 int bind_udp_port(int port) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
         .sin_port = htons(port)
     };
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+        fprintf(stderr, "bind() failed for UDP port %d: %s\n", port, strerror(errno));
         close(sock);
         return -1;
     }
@@ -131,29 +144,46 @@ int bind_udp_port(int port) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s --bind <port> [--bind <port> ...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--control-port <port>] --bind <port[:dstport]> [--bind <port[:dstport]> ...]\n", argv[0]);
         return 1;
     }
 
     signal(SIGPIPE, SIG_IGN);
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
-            int port = atoi(argv[++i]);
+        if (strcmp(argv[i], "--control-port") == 0 && i + 1 < argc) {
+            control_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
+            char *arg = argv[++i];
+            char *sep = strchr(arg, ':');
+            int port = atoi(arg);
+            int dst_port = sep ? atoi(sep + 1) : 0;
+
             if (relay_count >= MAX_RELAYS) {
                 fprintf(stderr, "Too many bound ports\n");
                 break;
             }
+
             int sock = bind_udp_port(port);
             if (sock >= 0) {
                 relays[relay_count].src_port = port;
                 relays[relay_count].sock_fd = sock;
                 relays[relay_count].has_dst = 0;
+
+                if (sep) {
+                    relays[relay_count].dst_addr.sin_family = AF_INET;
+                    relays[relay_count].dst_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    relays[relay_count].dst_addr.sin_port = htons(dst_port);
+                    relays[relay_count].has_dst = 1;
+                }
+
                 pthread_t tid;
                 pthread_create(&tid, NULL, relay_thread, &relays[relay_count]);
                 pthread_detach(tid);
                 relay_count++;
-                printf("Bound UDP %d\n", port);
+                printf("Bound UDP %d%s\n", port, sep ? " (with initial dst)" : "");
+            } else {
+                fprintf(stderr, "Failed to bind UDP port %d\n", port);
             }
         }
     }
