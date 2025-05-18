@@ -9,6 +9,7 @@ import argparse, socket, threading, time, re, pathlib
 from collections import defaultdict, deque
 from typing import Dict, Deque, Any
 from flask import Flask, jsonify, request, Response, abort, send_file
+from typing import Optional
 
 # ───────── regex helpers (unchanged) ─────────
 _RX_ANT_RE = re.compile(
@@ -88,7 +89,7 @@ def list_commands(host,port):
     return [l for l in tm_request(host,port,"list commands").splitlines() if l]
 
 # ───────────────── flask app ────────────────
-def create_app(host:str, port:int, ui_path:pathlib.Path|None) -> Flask:
+def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
     app=Flask(__name__, static_folder=None)  # disable default /static
 
     @app.route("/metrics")
