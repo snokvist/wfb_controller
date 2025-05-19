@@ -87,6 +87,22 @@ def tm_request(host:str,port:int,cmd:str)->str:
     except Exception as e: return f"ERROR: {e}"
 def list_commands(host,port):
     return [l for l in tm_request(host,port,"list commands").splitlines() if l]
+    
+def list_settings(host: str, port: int) -> Dict[str, str]:
+    """
+    Ask the thread-manager for `list settings`, and return
+    a dict mapping each placeholder → its current value.
+    """
+    out = tm_request(host, port, "list settings")
+    settings = {}
+    for line in out.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        # split only on first “:”
+        if ":" in line:
+            key, val = line.split(":", 1)
+            settings[key.strip()] = val.strip()
+    return settings
 
 # ───────────────── flask app ────────────────
 def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
@@ -100,6 +116,14 @@ def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
     @app.route("/commands")
     def commands_api() -> Response:
         return jsonify(list_commands(host,port))
+        
+    @app.route("/settings")
+    def settings_api() -> Response:
+        """
+        Return current TM settings as JSON:
+          { "passphrase": "openipc", "private_key_b64": "UVsWvM8P…", … }
+        """
+        return jsonify(list_settings(host, port))
 
     @app.route("/exec", methods=["POST"])
     def exec_api() -> Response:
