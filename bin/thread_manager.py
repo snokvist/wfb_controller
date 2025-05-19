@@ -6,8 +6,7 @@ Thread Manager + One-Shot Command Executor
 • Managed threads launched from `[threads]` in the INI profile.
 • Fire-and-forget shell commands taken from `[commands]`.
 • Placeholder **{tokens}** in both sections are substituted using every key
-  from `[settings]` **plus** `priv_key_path`; unknown placeholders raise a
-  *KeyError* at start-up.
+  from `[settings]`; unknown placeholders raise a *KeyError* at start-up.
 
 ─────────────────────────────────────────────────────────────────────────────
 NEW MANAGEMENT COMMANDS (TCP)
@@ -52,7 +51,6 @@ TM: "ThreadManager"
 CS: "CommandSet"
 SETTINGS_LIST: List[Tuple[str, str]] = []
 CONFIG_PATH: str
-KEY_PATH_OVERRIDE: str | None
 
 # ───────────────────────────── helpers ────────────────────────────────
 def dlog(msg: str):
@@ -71,23 +69,62 @@ def substitute_placeholders(text: str, mapping: Dict[str, str]) -> str:
     Single-pass replacement of {placeholders} using *mapping* while
     leaving any braces that already live *inside* the mapping values
     untouched.  
-    Example:
-        mapping value  "select_{adapter}"   → stays exactly that,
-        thread line    "{tx_switch_cmd}"    → becomes
-                       "select_{adapter}" after substitution.
     """
-    # 1) protect braces inside mapping values so str.format_map()
-    #    won’t treat them as placeholders.
-    esc = {k: _escape_braces(v) for k, v in mapping.items()}   # {{adapter}}
-
-    # 2) perform the normal single-level substitution.
+    esc = {k: _escape_braces(v) for k, v in mapping.items()}
     try:
         out = text.format_map(esc)
     except KeyError as e:
         raise KeyError(f"Unknown placeholder {e.args[0]} in '{text}'") from None
-
-    # 3) restore the original single braces inside the substituted values.
     return out.replace("{{", "{").replace("}}", "}")
+
+
+# ─────────────────────────── Key loading ──────────────────────────────
+def ensure_keys(cfg: configparser.ConfigParser):
+    """
+    Find all key_<name>_secret_b64 / _public_b64 and key_<name>_secret_path / _public_path
+    entries in [settings], decode the base64 values, and overwrite the files.
+    """
+    if "settings" not in cfg:
+        return
+
+    settings = cfg["settings"]
+    # collect per-key entries
+    key_entries: Dict[str, Dict[str, str]] = {}
+    for k, v in settings.items():
+        if not k.startswith("key_"):
+            continue
+        parts = k.split("_", 2)  # ["key", "<name>", "<rest>"]
+        if len(parts) != 3:
+            continue
+        _, name, rest = parts
+        key_entries.setdefault(name, {})[rest] = v.strip()
+
+    for name, ent in key_entries.items():
+        # secret key
+        secret_b64 = ent.get("secret_b64")
+        secret_path = ent.get("secret_path")
+        if secret_b64 and secret_path:
+            try:
+                raw = base64.b64decode(secret_b64)
+            except binascii.Error as e:
+                sys.exit(f"Cannot decode base64 for key_{name}_secret_b64: {e}")
+            p = Path(secret_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(raw)
+            p.chmod(0o600)
+
+        # public key
+        public_b64 = ent.get("public_b64")
+        public_path = ent.get("public_path")
+        if public_b64 and public_path:
+            try:
+                raw = base64.b64decode(public_b64)
+            except binascii.Error as e:
+                sys.exit(f"Cannot decode base64 for key_{name}_public_b64: {e}")
+            p = Path(public_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(raw)
+            p.chmod(0o644)
 
 
 # ───────────────────────── ManagedProcess ─────────────────────────────
@@ -97,18 +134,17 @@ class ManagedProcess:
         self.proc: subprocess.Popen | None = None
         self.restarts = 0
         self.alive = False
-        self.manual_stop = False  # ← new flag: set by user “stop”
+        self.manual_stop = False
         self.missing_exec = False
         self._last_missing = 0.0
         self._lock = threading.Lock()
 
-    # life-cycle -------------------------------------------------------
     def start(self, force: bool = False):
         with self._lock:
             if self.is_running():
                 return
             if self.manual_stop and not force:
-                return  # user explicitly stopped – watchdog keeps off
+                return
             try:
                 self.proc = subprocess.Popen(
                     shlex.split(self.cmd),
@@ -149,17 +185,16 @@ class ManagedProcess:
             if not self.proc:
                 return
             status = "TERM OK"
-            if self.proc.poll() is None:  # still running
+            if self.proc.poll() is None:
                 try:
                     self.proc.terminate()
                     self.proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     try:
-                        self.proc.kill()          # SIGKILL
+                        self.proc.kill()
                         self.proc.wait(timeout=3)
                         status = "KILL"
                     except subprocess.TimeoutExpired:
-                        # final fallback
                         try:
                             os.kill(self.proc.pid, 9)
                             status = "KILL-9"
@@ -173,13 +208,11 @@ class ManagedProcess:
                     pass
             self.alive = False
 
-    # internal ---------------------------------------------------------
     def _pump(self, pipe, stream):
         for line in iter(pipe.readline, ""):
             Broadcaster.publish(self.name, stream, line)
         pipe.close()
 
-    # info -------------------------------------------------------------
     def is_running(self):
         return self.alive and self.proc and self.proc.poll() is None
 
@@ -221,7 +254,6 @@ class Broadcaster:
                         dead.append(sock)
             for d in dead:
                 cls._listeners.pop(d, None)
-
         if delivered:
             cls._sent_bytes += delivered * len(payload)
         else:
@@ -265,7 +297,6 @@ class ThreadManager:
         self._active = True
         self._mon = threading.Thread(target=self._monitor, daemon=True)
 
-    # life-cycle -------------------------------------------------------
     def start_all(self):
         for p in self.procs.values():
             p.manual_stop = False
@@ -280,7 +311,6 @@ class ThreadManager:
     def shutdown(self):
         self._active = False
 
-    # watchdog ---------------------------------------------------------
     def _monitor(self):
         while not STOP_EVENT.is_set() and self._active:
             time.sleep(1)
@@ -288,7 +318,7 @@ class ThreadManager:
                 if STOP_EVENT.is_set() or not self._active:
                     break
                 if p.manual_stop:
-                    continue  # user stopped – hands off
+                    continue
                 if not p.is_running() and not p.missing_exec:
                     time.sleep(RESTART_DELAY)
                     p.restarts += 1
@@ -296,7 +326,6 @@ class ThreadManager:
                 elif p.missing_exec and time.time() - p._last_missing >= MISSING_RECHECK:
                     p.start()
 
-    # thread-level ops -------------------------------------------------
     def stop_thread(self, name: str):
         if name in self.procs:
             self.procs[name].stop(kill=True, manual=True)
@@ -316,7 +345,6 @@ class ThreadManager:
         for n in list(self.order):
             self.restart_thread(n)
 
-    # helpers ----------------------------------------------------------
     def list_names(self):
         return self.order
 
@@ -331,9 +359,7 @@ class ThreadManager:
         return (
             {k: p.status() for k, p in self.procs.items()}
             if n is None
-            else {
-                n: self.procs.get(n).status() if n in self.procs else "unknown"
-            }
+            else {n: self.procs.get(n).status() if n in self.procs else "unknown"}
         )
 
     def info(self, n=None):
@@ -376,20 +402,7 @@ MISC
 
 
 # ───────────────────────── config helpers ─────────────────────────────
-def ensure_key(cfg, key: Path) -> Path:
-    if key.exists():
-        return key
-    try:
-        raw = base64.b64decode(cfg["settings"]["private_key_b64"].strip())
-    except (KeyError, binascii.Error) as e:
-        sys.exit(f"Cannot create key: {e}")
-    key.parent.mkdir(parents=True, exist_ok=True)
-    key.write_bytes(raw)
-    key.chmod(0o600)
-    return key
-
-
-def load_sections(cfg, mapping: Dict[str, str], debug: bool):
+def load_sections(cfg: configparser.ConfigParser, mapping: Dict[str, str], debug: bool):
     if "threads" not in cfg:
         sys.exit("[threads] section missing in profile")
 
@@ -416,42 +429,27 @@ def load_sections(cfg, mapping: Dict[str, str], debug: bool):
     return procs, order, cmd_list
 
 
-def init_from_config(
-    config_path: str, key_override: str | None, debug: bool, first_run: bool = False
-):
+def init_from_config(config_path: str, debug: bool, first_run: bool = False):
     cfg = configparser.ConfigParser(interpolation=None)
     if not cfg.read(config_path):
         sys.exit(f"Cannot read {config_path}")
 
-    if key_override:
-        key_path_str = key_override
-    elif "settings" in cfg and "priv_key_path" in cfg["settings"]:
-        key_path_str = cfg["settings"]["priv_key_path"]
-    else:
-        if first_run:
-            sys.exit("--key-path not provided and 'priv_key_path' not in config")
-        raise RuntimeError(
-            "--key-path not provided and 'priv_key_path' not in config"
-        )
+    # process and write out all keys from [settings]
+    ensure_keys(cfg)
 
-    key_path = ensure_key(cfg, Path(key_path_str))
-
+    # build placeholder mapping from settings
     settings_map = (
         {k.strip(): v.strip() for k, v in cfg["settings"].items()}
         if "settings" in cfg
         else {}
     )
-    settings_map["priv_key_path"] = str(key_path)
 
     procs, order, cmd_list = load_sections(cfg, settings_map, debug)
-
     new_TM = ThreadManager(procs, order)
     new_CS = CommandSet(cmd_list)
-    new_SETTINGS = list(cfg["settings"].items()) + [
-        ("priv_key_path", str(key_path))
-    ]
+    new_SETTINGS = list(settings_map.items())
 
-    return new_TM, new_CS, new_SETTINGS, key_path, cfg
+    return new_TM, new_CS, new_SETTINGS
 
 
 # ─────────────────────────── CommandHandler ───────────────────────────
@@ -479,7 +477,7 @@ class CommandHandler(socketserver.BaseRequestHandler):
                         return
                     raise
 
-                if not raw:  # orderly peer close
+                if not raw:
                     break
 
                 if subs and raw in {b"\n", b"\r\n", b"\r"}:
@@ -684,43 +682,35 @@ def _debug_loop():
         time.sleep(1)
 
 
-# ───────────────────────── reload helper ──────────────────────────────
+# ────────────────────────── reload helper ─────────────────────────────
 def reload_config():
     """Stop running threads, reread config, rebuild TM/CS/settings."""
     global TM, CS, SETTINGS_LIST
 
     TM.shutdown()
     TM.stop_all()
-    new_TM, new_CS, new_SETTINGS, _, _ = init_from_config(
-        CONFIG_PATH, KEY_PATH_OVERRIDE, DEBUG_ENABLED
-    )
-    TM = new_TM
-    CS = new_CS
-    SETTINGS_LIST = new_SETTINGS
+    new_TM, new_CS, new_SETTINGS = init_from_config(CONFIG_PATH, DEBUG_ENABLED)
+    TM, CS, SETTINGS_LIST = new_TM, new_CS, new_SETTINGS
     TM.start_all()
 
 
 # ────────────────────────────────── main ──────────────────────────────
 def main():
-    global DEBUG_ENABLED, TM, CS, SETTINGS_LIST
-    global CONFIG_PATH, KEY_PATH_OVERRIDE
+    global DEBUG_ENABLED, TM, CS, SETTINGS_LIST, CONFIG_PATH
 
     if os.geteuid() != 0:
         sys.exit("Must be run as root (sudo).")
 
     pa = argparse.ArgumentParser()
     pa.add_argument("--config", required=True, help="Path to profile")
-    pa.add_argument("--key-path", help="Override private-key file path")
     pa.add_argument("--debug", action="store_true")
     pa.add_argument("--port", type=int, default=9500)
     args = pa.parse_args()
+
     DEBUG_ENABLED = args.debug
     CONFIG_PATH = args.config
-    KEY_PATH_OVERRIDE = args.key_path
 
-    TM, CS, SETTINGS_LIST, _, _ = init_from_config(
-        CONFIG_PATH, KEY_PATH_OVERRIDE, DEBUG_ENABLED, first_run=True
-    )
+    TM, CS, SETTINGS_LIST = init_from_config(CONFIG_PATH, DEBUG_ENABLED, first_run=True)
     TM.start_all()
 
     if DEBUG_ENABLED:
