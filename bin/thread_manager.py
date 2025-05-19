@@ -472,8 +472,12 @@ class CommandHandler(socketserver.BaseRequestHandler):
                     if subs:
                         continue
                     break
+                except ConnectionResetError:
+                    # client hung up unexpectedly
+                    break
                 except OSError as e:
-                    if e.errno == errno.EBADF:
+                    if e.errno in (errno.EBADF, errno.ECONNRESET):
+                        # bad file descriptor or reset by peer → clean up
                         return
                     raise
 
