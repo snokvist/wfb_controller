@@ -26,12 +26,12 @@ def hash_link_domain(link_domain):
 
 
 
-''
+'''
 piS relay setup
 wlan0 listens on standard channel with standard link domain 7669206
 wlan0 retransmits on new relay channel with relay link domain 12396722
 adapter on gs listening on channel 104 picks up the relayed data and sends to aggregator
-''
+'''
 #Listen to existing stream
 ''
 wfb_rx -f -c 127.0.0.1 -u 5600 -p 0 -i 7669206 -R 2097152 wlan0 &
