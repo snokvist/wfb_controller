@@ -13,3 +13,13 @@ echo "status" | nc 127.0.0.1 9000
 
 
 ./ant_selector.py --tx-antennas 7f000001000000,7f000001000001 --switch-cmd "printf 'exec select_{adapter}' | nc -N 127.0.0.1 9500"
+
+
+
+Link_domain generation:
+printf "%d\n" $((0x$(echo -n default | sha1sum | cut -c1-6)))
+
+hash_link_domain(){ printf "%d\n" $((0x$(printf "%s" "$1" | sha1sum | cut -c1-6))); }
+
+def hash_link_domain(link_domain):
+    return int.from_bytes(hashlib.sha1(link_domain.encode('utf-8')).digest()[:3], 'big')
