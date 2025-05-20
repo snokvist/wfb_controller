@@ -23,3 +23,21 @@ hash_link_domain(){ printf "%d\n" $((0x$(printf "%s" "$1" | sha1sum | cut -c1-6)
 
 def hash_link_domain(link_domain):
     return int.from_bytes(hashlib.sha1(link_domain.encode('utf-8')).digest()[:3], 'big')
+
+
+
+''
+piS relay setup
+wlan0 listens on standard channel with standard link domain 7669206
+wlan0 retransmits on new relay channel with relay link domain 12396722
+adapter on gs listening on channel 104 picks up the relayed data and sends to aggregator
+''
+#Listen to existing stream
+''
+wfb_rx -f -c 127.0.0.1 -u 5600 -p 0 -i 7669206 -R 2097152 wlan0 &
+''
+
+#retransmit on another channel/adapter
+''
+wfb_tx -K /etc/openipc.key -M 5 -B 20 -k 8 -n 12 -u 5600 -S 1 -L 1 -i 12396722 -C 8001 wlan1 &
+''
