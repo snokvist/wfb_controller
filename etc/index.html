@@ -67,52 +67,41 @@ function drawTab(tabId,data,antKey,ySel){
 if (mode === 'stats') {
   cont.innerHTML = '';
 
-  // For each container (tun_agg_rx, video_agg_rx, etc.)
   Object.entries(data).forEach(([container, kinds]) => {
+    // only containers with at least one antenna entry
     if (!kinds[antKey]?.length) return;
 
     // Container heading
     cont.innerHTML += `<div class="thread">${container}</div>`;
 
-    // PKT line (if any)
-    if (kinds.PKT && kinds.PKT.length) {
-      const p = kinds.PKT[kinds.PKT.length - 1];
-      cont.innerHTML += `
-        <div class="card">
-          PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data}
-               | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered}
-               | lost=${p.count_p_lost} | out=${p.count_p_outgoing}
-               | sess=${p.count_p_session} | uniq=${p.count_p_uniq}
-        </div>`;
-    }
-
-    // Build a map of latest reading per antenna_id
+    // Build latest‐per‐antenna map
     const latestByAnt = {};
     kinds[antKey].forEach(s => latestByAnt[s.antenna_id] = s);
 
-    // One‐liner per antenna
+    // Start one card for this container
+    let cardHtml = '';
+
+    // Add PKT summary if present
+    if (kinds.PKT && kinds.PKT.length) {
+      const p = kinds.PKT[kinds.PKT.length - 1];
+      cardHtml += `PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}\n`;
+    }
+
+    // Add one line per antenna (RX or TX)
     Object.values(latestByAnt).forEach(s => {
       if (s.latency) {
-        // TX‐style
-        cont.innerHTML += `
-          <div class="card">
-            A: ${s.antenna_id}
-            | inj=${s.pkt_injected} | drop=${s.pkt_dropped}
-            | lat_avg=${s.latency.lat_avg} ms
-            | lat_min=${s.latency.lat_min} ms
-            | lat_max=${s.latency.lat_max} ms
-          </div>`;
+        // TX‐style line
+        cardHtml += `A: ${s.antenna_id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.lat_avg} ms | lat_min=${s.latency.lat_min} ms | lat_max=${s.latency.lat_max} ms\n`;
       } else {
-        // RX‐style
-        cont.innerHTML += `
-          <div class="card">
-            A: ${s.antenna_id}
-            | BW=${s.bw} MHz | F=${s.freq} MHz
-            | PC=${s.packet_count}
-            | RA=${s.rssi.rssi_avg} dBm | SA=${s.snr.snr_avg} dB
-          </div>`;
+        // RX‐style line
+        cardHtml += `A: ${s.antenna_id} | BW=${s.bw} MHz | F=${s.freq} MHz | PC=${s.packet_count} | RA=${s.rssi.rssi_avg} dBm | SA=${s.snr.snr_avg} dB\n`;
       }
     });
+
+    // Render the full card
+    cont.innerHTML += `<div class="card" style="white-space:pre-wrap;font-family:monospace">
+${cardHtml.trim()}
+</div>`;
   });
 
   return;
