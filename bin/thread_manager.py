@@ -1,75 +1,71 @@
 #!/usr/bin/env python3
 """
-Thread Manager + One-Shot Command Executor
-==========================================
+Async Thread Manager & Command Server  – Python 3.9-compatible
+=============================================================
 
-• Managed threads launched from `[threads]` in the INI profile.
-• Fire-and-forget shell commands taken from `[commands]`.
-• Placeholder **{tokens}** in both sections are substituted using every key
-  from `[settings]`; unknown placeholders raise a *KeyError* at start-up.
-
-─────────────────────────────────────────────────────────────────────────────
-NEW MANAGEMENT COMMANDS (TCP)
-─────────────────────────────────────────────────────────────────────────────
-reload                       – stop **all** threads, reread the profile,  
-                               rebuild thread list and commands  
-restart  all|thread|index    – stop + start running threads (live config)  
-stop     all|thread|index    – stop running thread(s) and mark *manual-stop*  
-start    all|thread|index    – (re)start manually-stopped thread(s)
-
-Manually stopped threads are **not** auto-restarted by the watchdog until
-`start` or `restart` is issued: no more surprise respawns or double instances.
+• Pure-asyncio core (zero Python threads for I/O)
+• Auto-restart, reload, placeholder substitution – same features as original
+• Comma-separated & wildcard stream subscriptions:
+      stream foo,bar stdout
+      stream worker* all
+      stream * stderr
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import binascii
 import configparser
-import errno
+import fnmatch
+import logging
 import os
 import shlex
 import signal
-import socket
-import socketserver
-import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Mapping, Optional, Set, Tuple
 
-DEBUG_LINE_TEMPLATE = "RUN:{run} RST:{rst} TX:{tx} DROP:{drop}"
-MAX_CONNECTIONS, IDLE_TIMEOUT = 10, 60
-RESTART_DELAY, MISSING_RECHECK = 5, 30
-STOP_EVENT = threading.Event()
-DEBUG_ENABLED = False
+# ───────────────────────── constants ─────────────────────────
+MAX_CONNECTIONS   = 30
+IDLE_TIMEOUT      = 60          # seconds client may stay idle (if not streaming)
+RESTART_DELAY     = 5           # delay before restart attempt
+MISSING_RECHECK   = 30          # retry period for missing executables
+QUEUE_HIGH_WATER  = 64          # max payloads buffered per client
 
-# Globals replaced on reload ───────────────────────────────────────────
-TM: "ThreadManager"
-CS: "CommandSet"
-SETTINGS_LIST: List[Tuple[str, str]] = []
-CONFIG_PATH: str
+HELP_TEXT = """\
+THREAD QUERIES
+list                      – names of all threads
+status [thread|idx]       – status of all / one thread
+info   [thread|idx]       – command line of all / one thread
+stream <thread[,..]|*> <stdout|stderr|all>
+list stream all           – stream every thread’s stdout+stderr
+list settings             – show placeholder → value map
 
-# ───────────────────────────── helpers ────────────────────────────────
-def dlog(msg: str):
-    if DEBUG_ENABLED:
-        sys.stderr.write(f"[SHUT] {msg}\n")
-        sys.stderr.flush()
+ONE-SHOT SHELL COMMANDS
+list commands             – list programmable one-shot commands
+exec <name|index>         – run one-shot command
 
+THREAD CONTROL
+start   <thread|idx|all>  – start stopped thread(s)
+stop    <thread|idx|all>  – stop running thread(s)
+restart <thread|idx|all>  – stop+start thread(s)
+reload                    – re-read config, rebuild whole thread set
 
-def _escape_braces(s: str) -> str:  # single-level substitution helper
+MISC
+help                      – this help text
+"""
+
+LOG_FMT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+logger  = logging.getLogger("manager")
+
+# ───────────────────── placeholder helpers ──────────────────────
+def _escape_braces(s: str) -> str:
     return s.replace("{", "{{").replace("}", "}}")
 
-
-# ───────────────────────── helper: placeholder substitution ──────────
-def substitute_placeholders(text: str, mapping: Dict[str, str]) -> str:
-    """
-    Single-pass replacement of {placeholders} using *mapping* while
-    leaving any braces that already live *inside* the mapping values
-    untouched.  
-    """
+def substitute(text: str, mapping: Mapping[str, str]) -> str:
     esc = {k: _escape_braces(v) for k, v in mapping.items()}
     try:
         out = text.format_map(esc)
@@ -77,677 +73,518 @@ def substitute_placeholders(text: str, mapping: Dict[str, str]) -> str:
         raise KeyError(f"Unknown placeholder {e.args[0]} in '{text}'") from None
     return out.replace("{{", "{").replace("}}", "}")
 
-
-# ─────────────────────────── Key loading ──────────────────────────────
-def ensure_keys(cfg: configparser.ConfigParser):
-    """
-    Find all key_<name>_secret_b64 / _public_b64 and key_<name>_secret_path / _public_path
-    entries in [settings], decode the base64 values, and overwrite the files.
-    """
+# ───────────────────── key material helper ─────────────────────
+def ensure_keys(cfg: configparser.ConfigParser) -> None:
     if "settings" not in cfg:
         return
-
     settings = cfg["settings"]
-    # collect per-key entries
-    key_entries: Dict[str, Dict[str, str]] = {}
+    keys: Dict[str, Dict[str, str]] = {}
     for k, v in settings.items():
         if not k.startswith("key_"):
             continue
-        parts = k.split("_", 2)  # ["key", "<name>", "<rest>"]
+        parts = k.split("_", 2)          # key_<name>_rest
         if len(parts) != 3:
             continue
         _, name, rest = parts
-        key_entries.setdefault(name, {})[rest] = v.strip()
+        keys.setdefault(name, {})[rest] = v.strip()
 
-    for name, ent in key_entries.items():
-        # secret key
-        secret_b64 = ent.get("secret_b64")
-        secret_path = ent.get("secret_path")
-        if secret_b64 and secret_path:
+    for name, ent in keys.items():
+        # secret
+        if ent.get("secret_b64") and ent.get("secret_path"):
             try:
-                raw = base64.b64decode(secret_b64)
+                raw = base64.b64decode(ent["secret_b64"])
             except binascii.Error as e:
                 sys.exit(f"Cannot decode base64 for key_{name}_secret_b64: {e}")
-            p = Path(secret_path)
+            p = Path(ent["secret_path"])
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(raw)
             p.chmod(0o600)
-
-        # public key
-        public_b64 = ent.get("public_b64")
-        public_path = ent.get("public_path")
-        if public_b64 and public_path:
+        # public
+        if ent.get("public_b64") and ent.get("public_path"):
             try:
-                raw = base64.b64decode(public_b64)
+                raw = base64.b64decode(ent["public_b64"])
             except binascii.Error as e:
                 sys.exit(f"Cannot decode base64 for key_{name}_public_b64: {e}")
-            p = Path(public_path)
+            p = Path(ent["public_path"])
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(raw)
             p.chmod(0o644)
 
+# ───────────────────── broadcaster ──────────────────────────────
+class AsyncBroadcaster:
+    """Fan-out stdout/stderr lines to subscribed clients."""
 
-# ───────────────────────── ManagedProcess ─────────────────────────────
-class ManagedProcess:
-    def __init__(self, name: str, cmd: str, debug: bool):
-        self.name, self.cmd, self.debug = name, cmd, debug
-        self.proc: subprocess.Popen | None = None
-        self.restarts = 0
-        self.alive = False
-        self.manual_stop = False
-        self.missing_exec = False
-        self._last_missing = 0.0
-        self._lock = threading.Lock()
+    def __init__(self) -> None:
+        self._subs   : Dict[asyncio.StreamWriter, Set[Tuple[str,str]]|str] = {}
+        self._queues : Dict[asyncio.StreamWriter, asyncio.Queue[bytes]]    = {}
+        self._lock   = asyncio.Lock()
+        self._sent   = 0
+        self._dropped= 0
 
-    def start(self, force: bool = False):
-        with self._lock:
-            if self.is_running():
-                return
-            if self.manual_stop and not force:
-                return
+    async def add(self, w: asyncio.StreamWriter, spec) -> None:
+        async with self._lock:
+            self._subs[w] = spec
+            q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=QUEUE_HIGH_WATER)
+            self._queues[w] = q
+            asyncio.create_task(self._writer_loop(w, q))
+
+    async def remove(self, w: asyncio.StreamWriter) -> None:
+        async with self._lock:
+            self._subs.pop(w, None)
+            q = self._queues.pop(w, None)
+            if q:
+                q.put_nowait(b"__CLOSE__")
+
+    async def publish(self, name: str, stream: str, line: str) -> None:
+        payload = f"{name}:{line}".encode()
+        async with self._lock:
+            for w, spec in self._subs.items():
+                want = spec == "ALL" or (isinstance(spec,set) and (name, stream) in spec)
+                if not want:
+                    continue
+                q = self._queues[w]
+                if q.full():
+                    self._dropped += len(payload)
+                    continue
+                q.put_nowait(payload)
+                self._sent += len(payload)
+
+    async def _writer_loop(self, w: asyncio.StreamWriter, q: asyncio.Queue[bytes]):
+        try:
+            while True:
+                chunk = await q.get()
+                if chunk == b"__CLOSE__":
+                    break
+                try:
+                    w.write(chunk)
+                    await w.drain()
+                except (ConnectionResetError,OSError):
+                    break
+        finally:
             try:
-                self.proc = subprocess.Popen(
-                    shlex.split(self.cmd),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                )
-            except FileNotFoundError as e:
-                self.alive = False
-                self.missing_exec = True
-                self._last_missing = time.time()
-                print(f"[MISSING] {self.name}: {e}", file=sys.stderr)
-                return
-            except Exception as e:
-                self.alive = False
-                print(f"[ERROR] Could not start {self.name}: {e}", file=sys.stderr)
-                return
-            self.alive = True
-            self.missing_exec = False
-            if self.debug:
-                print(
-                    f"[START] {self.name} pid={self.proc.pid}\n        cmd: {self.cmd}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            threading.Thread(
-                target=self._pump, args=(self.proc.stdout, "stdout"), daemon=True
-            ).start()
-            threading.Thread(
-                target=self._pump, args=(self.proc.stderr, "stderr"), daemon=True
-            ).start()
+                w.close()
+                await w.wait_closed()
+            except Exception:
+                pass
 
-    def stop(self, kill: bool = False, manual: bool = False):
-        with self._lock:
-            if manual:
-                self.manual_stop = True
-            if not self.proc:
-                return
-            status = "TERM OK"
-            if self.proc.poll() is None:
-                try:
-                    self.proc.terminate()
-                    self.proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self.proc.kill()
-                        self.proc.wait(timeout=3)
-                        status = "KILL"
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.kill(self.proc.pid, 9)
-                            status = "KILL-9"
-                        except Exception:
-                            status = "UNSTOPPABLE"
-            dlog(f"    • {self.name} pid {self.proc.pid} -> {status}")
-            for p in (self.proc.stdout, self.proc.stderr):
-                try:
-                    p.close()
-                except Exception:
-                    pass
+BCAST = AsyncBroadcaster()
+
+# ───────────────────── managed process ──────────────────────────
+class AsyncManagedProcess:
+    def __init__(self, name: str, cmd: str, debug: bool) -> None:
+        self.name, self.cmd, self.debug = name, cmd, debug
+        self.proc       : Optional[asyncio.subprocess.Process] = None
+        self.alive      = False
+        self.manual_stop= False
+        self.missing    = False
+        self.last_miss  = 0.0
+        self.restarts   = 0
+        self._tasks     : List[asyncio.Task] = []
+
+    async def start(self, *, force=False) -> None:
+        if self.alive and not force:
+            return
+        if self.manual_stop and not force:
+            return
+        argv = shlex.split(self.cmd)
+        try:
+            # Python 3.9: no "text" parameter
+            self.proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
             self.alive = False
+            self.missing = True
+            self.last_miss = time.monotonic()
+            logger.error("[MISSING] %s: %s", self.name, e)
+            return
 
-    def _pump(self, pipe, stream):
-        for line in iter(pipe.readline, ""):
-            Broadcaster.publish(self.name, stream, line)
-        pipe.close()
+        self.alive   = True
+        self.missing = False
+        if self.debug:
+            logger.info("START %s pid=%d", self.name, self.proc.pid)
+        for reader, sname in ((self.proc.stdout,"stdout"),
+                              (self.proc.stderr,"stderr")):
+            self._tasks.append(asyncio.create_task(self._pump(reader,sname)))
+        self._tasks.append(asyncio.create_task(self._waiter()))
 
-    def is_running(self):
-        return self.alive and self.proc and self.proc.poll() is None
+    async def stop(self) -> None:
+        self.manual_stop = True
+        if not self.proc or not self.alive:
+            return
+        if self.proc.returncode is None:
+            self.proc.terminate()
+            try:
+                await asyncio.wait_for(self.proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                self.proc.kill()
+                await self.proc.wait()
+        self.alive = False
+        for t in self._tasks:
+            t.cancel()
 
-    def status(self):
-        if self.manual_stop:
-            return "stopped"
-        if self.missing_exec:
-            return "missing"
-        return "running" if self.is_running() else "error"
+    async def _pump(self, reader: asyncio.StreamReader, stream: str):
+        try:
+            async for line in reader:
+                # decode bytes → str (replace errors)
+                await BCAST.publish(self.name, stream, line.decode(errors="replace"))
+        except asyncio.CancelledError:
+            pass
 
+    async def _waiter(self):
+        if self.proc:
+            await self.proc.wait()
+        self.alive = False
 
-# ─────────────────────────── Broadcaster ──────────────────────────────
-class Broadcaster:
-    _listeners: Dict[socket.socket, Set[Tuple[str, str]] | str] = {}
-    _sent_bytes = _dropped_bytes = 0
-    _lock = threading.Lock()
+    def status(self) -> str:
+        if self.manual_stop: return "stopped"
+        if self.missing:     return "missing"
+        return "running" if self.alive else "error"
 
-    @classmethod
-    def add_listener(cls, sock, subs):
-        with cls._lock:
-            cls._listeners[sock] = subs
+# ───────────────────── process manager ──────────────────────────
+class ProcessManager:
+    def __init__(self, procs: Dict[str,AsyncManagedProcess]):
+        self.procs = procs
+        self._mon_task: Optional[asyncio.Task] = None
 
-    @classmethod
-    def remove_listener(cls, sock):
-        with cls._lock:
-            cls._listeners.pop(sock, None)
-
-    @classmethod
-    def publish(cls, name: str, stream: str, data: str):
-        payload = f"{name}:{data}".encode()
-        delivered, dead = 0, []
-        with cls._lock:
-            for sock, subs in cls._listeners.items():
-                if subs == "ALL" or (isinstance(subs, set) and (name, stream) in subs):
-                    try:
-                        sock.sendall(payload)
-                        delivered += 1
-                    except Exception:
-                        dead.append(sock)
-            for d in dead:
-                cls._listeners.pop(d, None)
-        if delivered:
-            cls._sent_bytes += delivered * len(payload)
-        else:
-            cls._dropped_bytes += len(payload)
-
-    @classmethod
-    def sent_bytes(cls):
-        with cls._lock:
-            return cls._sent_bytes
-
-    @classmethod
-    def dropped_bytes(cls):
-        with cls._lock:
-            return cls._dropped_bytes
-
-
-# ─────────────────────────── CommandSet ───────────────────────────────
-class CommandSet:
-    def __init__(self, cmds: List[Tuple[str, str]]):
-        self.order = [n for n, _ in cmds]
-        self.map = dict(cmds)
-
-    def list_names(self):
-        return self.order
-
-    def name_from_token(self, tok: str):
-        return (
-            self.order[int(tok) - 1]
-            if tok.isdigit() and 1 <= int(tok) <= len(self.order)
-            else tok
-        )
-
-    def get(self, name: str):
-        return self.map.get(name)
-
-
-# ─────────────────────────── ThreadManager ────────────────────────────
-class ThreadManager:
-    def __init__(self, procs: Dict[str, ManagedProcess], order: List[str]):
-        self.procs, self.order = procs, order
-        self._active = True
-        self._mon = threading.Thread(target=self._monitor, daemon=True)
-
-    def start_all(self):
+    async def start_all(self):
         for p in self.procs.values():
             p.manual_stop = False
-            p.start(force=True)
-        if not self._mon.is_alive():
-            self._mon.start()
+            await p.start(force=True)
+        if not self._mon_task or self._mon_task.done():
+            self._mon_task = asyncio.create_task(self._monitor())
 
-    def stop_all(self, manual: bool = False):
+    async def stop_all(self):
         for p in self.procs.values():
-            p.stop(kill=True, manual=manual)
+            await p.stop()
 
-    def shutdown(self):
-        self._active = False
+    async def shutdown(self):
+        if self._mon_task:
+            self._mon_task.cancel()
+        await self.stop_all()
 
-    def _monitor(self):
-        while not STOP_EVENT.is_set() and self._active:
-            time.sleep(1)
-            for p in self.procs.values():
-                if STOP_EVENT.is_set() or not self._active:
-                    break
-                if p.manual_stop:
-                    continue
-                if not p.is_running() and not p.missing_exec:
-                    time.sleep(RESTART_DELAY)
-                    p.restarts += 1
-                    p.start()
-                elif p.missing_exec and time.time() - p._last_missing >= MISSING_RECHECK:
-                    p.start()
+    async def _monitor(self):
+        try:
+            while True:
+                await asyncio.sleep(1)
+                for p in self.procs.values():
+                    if p.manual_stop:
+                        continue
+                    if not p.alive and not p.missing:
+                        await asyncio.sleep(RESTART_DELAY)
+                        p.restarts += 1
+                        await p.start()
+                    elif p.missing and time.monotonic()-p.last_miss >= MISSING_RECHECK:
+                        await p.start()
+        except asyncio.CancelledError:
+            pass
 
-    def stop_thread(self, name: str):
-        if name in self.procs:
-            self.procs[name].stop(kill=True, manual=True)
+    # convenience ----------------------------------------------------
+    def list_names(self): return list(self.procs.keys())
 
-    def start_thread(self, name: str):
-        if name in self.procs:
-            self.procs[name].manual_stop = False
-            self.procs[name].start(force=True)
+    def name_from_token(self, tok: str) -> str:
+        order = self.list_names()
+        if tok.isdigit() and 1<=int(tok)<=len(order):
+            return order[int(tok)-1]
+        return tok
 
-    def restart_thread(self, name: str):
-        if name in self.procs:
-            self.stop_thread(name)
-            time.sleep(RESTART_DELAY)
-            self.start_thread(name)
+    def status(self, n: Optional[str]=None):
+        if n is None:
+            return {k:p.status() for k,p in self.procs.items()}
+        p = self.procs.get(n)
+        return {n: p.status() if p else "unknown"}
 
-    def restart_all(self):
-        for n in list(self.order):
-            self.restart_thread(n)
+    def info(self, n: Optional[str]=None):
+        if n is None:
+            return {k:p.cmd for k,p in self.procs.items()}
+        p = self.procs.get(n)
+        return {n: p.cmd if p else "unknown"}
 
-    def list_names(self):
-        return self.order
+    async def restart_thread(self, name:str):
+        p = self.procs.get(name)
+        if not p: return
+        await p.stop()
+        await asyncio.sleep(RESTART_DELAY)
+        p.manual_stop=False
+        await p.start()
 
-    def name_from_token(self, tok):
-        return (
-            self.order[int(tok) - 1]
-            if tok.isdigit() and 1 <= int(tok) <= len(self.order)
-            else tok
-        )
+    async def restart_all(self):
+        for n in self.list_names():
+            await self.restart_thread(n)
 
-    def status(self, n=None):
-        return (
-            {k: p.status() for k, p in self.procs.items()}
-            if n is None
-            else {n: self.procs.get(n).status() if n in self.procs else "unknown"}
-        )
+    async def stop_thread(self, name:str):
+        p=self.procs.get(name)
+        if p: await p.stop()
 
-    def info(self, n=None):
-        return (
-            {k: p.cmd for k, p in self.procs.items()}
-            if n is None
-            else {n: self.procs.get(n).cmd if n in self.procs else "unknown"}
-        )
+    async def start_thread(self, name:str):
+        p=self.procs.get(name)
+        if p:
+            p.manual_stop=False
+            await p.start(force=True)
 
-    def restarts_total(self):
-        return sum(p.restarts for p in self.procs.values())
+    def restarts_total(self): return sum(p.restarts for p in self.procs.values())
 
-    def running_count(self):
-        return sum(1 for p in self.procs.values() if p.is_running())
+# ───────────────────── one-shot command set ────────────────────────
+class CommandSet:
+    def __init__(self, cmds: List[Tuple[str,str]]):
+        self.order=[n for n,_ in cmds]
+        self.map  =dict(cmds)
 
+    def list_names(self): return self.order
+    def name_from_token(self,tok:str)->str:
+        if tok.isdigit() and 1<=int(tok)<=len(self.order):
+            return self.order[int(tok)-1]
+        return tok
+    def get(self,name:str): return self.map.get(name)
 
-# ──────────────────────────── TCP HELP text ───────────────────────────
-HELP_TEXT = """\
-THREAD QUERIES
-  list                      – names of all threads
-  status [thread|index]     – status of all / one thread
-  info   [thread|index]     – command line of all / one thread
-  stream <thread|idx> <stdout|stderr|all>
-  list stream all           – stream every thread’s stdout+stderr
-  list settings             – show placeholder → value map
+# ───────────────────── config loader ───────────────────────────────
+async def load_config(path:str, debug:bool):
+    cfg=configparser.ConfigParser(interpolation=None)
+    if not cfg.read(path):
+        sys.exit(f"Cannot read {path}")
 
-ONE-SHOT SHELL COMMANDS
-  list commands             – list programmable one-shot commands
-  exec <name|index>         – run one-shot command
+    ensure_keys(cfg)
+    settings = {k.strip():v.strip() for k,v in cfg["settings"].items()} if "settings" in cfg else {}
 
-THREAD CONTROL
-  start   <thread|idx|all>  – start stopped thread(s)
-  stop    <thread|idx|all>  – stop running thread(s)
-  restart <thread|idx|all>  – stop+start thread(s)
-  reload                    – re-read config, rebuild whole thread set
-
-MISC
-  help                      – this help text
-"""
-
-
-# ───────────────────────── config helpers ─────────────────────────────
-def load_sections(cfg: configparser.ConfigParser, mapping: Dict[str, str], debug: bool):
     if "threads" not in cfg:
         sys.exit("[threads] section missing in profile")
 
-    order: List[str] = []
-    procs: Dict[str, ManagedProcess] = {}
-    cmd_list: List[Tuple[str, str]] = []
+    procs: Dict[str,AsyncManagedProcess]={}
+    for name,cmd in cfg["threads"].items():
+        procs[name]=AsyncManagedProcess(name, substitute(cmd,settings), debug)
 
-    for name, cmd in cfg["threads"].items():
-        try:
-            full_cmd = substitute_placeholders(cmd, mapping)
-        except KeyError as e:
-            sys.exit(str(e))
-        procs[name] = ManagedProcess(name, full_cmd, debug)
-        order.append(name)
-
+    cmd_list: List[Tuple[str,str]]=[]
     if "commands" in cfg:
-        for name, cmd in cfg["commands"].items():
-            try:
-                full_cmd = substitute_placeholders(cmd, mapping)
-            except KeyError as e:
-                sys.exit(str(e))
-            cmd_list.append((name, full_cmd))
+        for name,cmd in cfg["commands"].items():
+            cmd_list.append((name,substitute(cmd,settings)))
 
-    return procs, order, cmd_list
+    pm=ProcessManager(procs)
+    cs=CommandSet(cmd_list)
+    settings_list=list(settings.items())
+    return pm,cs,settings_list
 
+# ───────────────────── client session ──────────────────────────────
+class ClientSession:
+    def __init__(self, rd:asyncio.StreamReader, wr:asyncio.StreamWriter,
+                 pm:ProcessManager, cs:CommandSet, settings_list):
+        self.r=rd ; self.w=wr
+        self.pm=pm ; self.cs=cs ; self.settings=settings_list
+        self.subscribed=False
 
-def init_from_config(config_path: str, debug: bool, first_run: bool = False):
-    cfg = configparser.ConfigParser(interpolation=None)
-    if not cfg.read(config_path):
-        sys.exit(f"Cannot read {config_path}")
-
-    # process and write out all keys from [settings]
-    ensure_keys(cfg)
-
-    # build placeholder mapping from settings
-    settings_map = (
-        {k.strip(): v.strip() for k, v in cfg["settings"].items()}
-        if "settings" in cfg
-        else {}
-    )
-
-    procs, order, cmd_list = load_sections(cfg, settings_map, debug)
-    new_TM = ThreadManager(procs, order)
-    new_CS = CommandSet(cmd_list)
-    new_SETTINGS = list(settings_map.items())
-
-    return new_TM, new_CS, new_SETTINGS
-
-
-# ─────────────────────────── CommandHandler ───────────────────────────
-class CommandHandler(socketserver.BaseRequestHandler):
-    def handle(self):
-        sock = self.request
-        if len(self.server.connections) >= MAX_CONNECTIONS:
-            sock.sendall(b"ERR Too many connections\n")
-            return
-
-        self.server.connections.add(sock)
-        sock.settimeout(IDLE_TIMEOUT)
-        subs = None
-
+    async def run(self):
         try:
-            while not STOP_EVENT.is_set():
+            while True:
                 try:
-                    raw = sock.recv(1024)
-                except socket.timeout:
-                    if subs:
-                        continue
+                    raw=await asyncio.wait_for(self.r.readline(), timeout=IDLE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    if self.subscribed: continue
                     break
-                except ConnectionResetError:
-                    # client hung up unexpectedly
-                    break
-                except OSError as e:
-                    if e.errno in (errno.EBADF, errno.ECONNRESET):
-                        # bad file descriptor or reset by peer → clean up
-                        return
-                    raise
-
-                if not raw:
-                    break
-
-                if subs and raw in {b"\n", b"\r\n", b"\r"}:
-                    Broadcaster.remove_listener(sock)
-                    subs = None
-                    sock.sendall(b"STREAM stopped\n")
-                    continue
-
-                line = raw.decode().strip()
-                if not line:
-                    continue
-                parts = line.split()
-                cmd = parts[0].lower()
-
-                # help -------------------------------------------------
-                if cmd == "help":
-                    sock.sendall(HELP_TEXT.encode())
-                    continue
-
-                # list -------------------------------------------------
-                if cmd == "list":
-                    if len(parts) == 1:
-                        sock.sendall(("\n".join(TM.list_names()) + "\n").encode())
-                    elif parts[1] == "status":
-                        sock.sendall(
-                            (
-                                "\n".join(f"{k}: {v}" for k, v in TM.status().items())
-                                + "\n"
-                            ).encode()
-                        )
-                    elif parts[1] == "info":
-                        sock.sendall(
-                            (
-                                "\n".join(f"{k}: {v}" for k, v in TM.info().items())
-                                + "\n"
-                            ).encode()
-                        )
-                    elif parts[1] == "commands":
-                        sock.sendall(("\n".join(CS.list_names()) + "\n").encode())
-                    elif parts[1] == "settings":
-                        sock.sendall(
-                            ("\n".join(f"{k}: {v}" for k, v in SETTINGS_LIST) + "\n").encode()
-                        )
-                    elif len(parts) > 2 and parts[1] == "stream" and parts[2] == "all":
-                        subs = "ALL"
-                        Broadcaster.add_listener(sock, "ALL")
-                        sock.sendall(b"STREAM ALL\n")
-                    else:
-                        sock.sendall(b"ERR Unknown list subcommand\n")
-                    continue
-
-                # status / info ---------------------------------------
-                if cmd in {"status", "info"}:
-                    if len(parts) == 1:
-                        func = TM.status if cmd == "status" else TM.info
-                        sock.sendall(
-                            ("\n".join(f"{k}: {v}" for k, v in func().items()) + "\n").encode()
-                        )
-                    elif len(parts) == 2:
-                        name = TM.name_from_token(parts[1])
-                        func = TM.status if cmd == "status" else TM.info
-                        k, v = next(iter(func(name).items()))
-                        sock.sendall(f"{k}: {v}\n".encode())
-                    else:
-                        sock.sendall(f"ERR {cmd} takes zero or one argument\n".encode())
-                    continue
-
-                # stream ----------------------------------------------
-                if cmd == "stream" and len(parts) == 3:
-                    token, spec = parts[1], parts[2]
-                    if spec not in {"stdout", "stderr", "all"}:
-                        token, spec = parts[2], parts[1]
-                    if spec not in {"stdout", "stderr", "all"}:
-                        sock.sendall(b"ERR stream <thread|index> <stdout|stderr|all>\n")
-                        continue
-                    name = TM.name_from_token(token)
-                    if name not in TM.procs:
-                        sock.sendall(b"ERR No such thread\n")
-                        continue
-                    subs = (
-                        {(name, "stdout"), (name, "stderr")}
-                        if spec == "all"
-                        else {(name, spec)}
-                    )
-                    Broadcaster.add_listener(sock, subs)
-                    sock.sendall(f"STREAM {name} {spec}\n".encode())
-                    continue
-
-                # exec -------------------------------------------------
-                if cmd == "exec" and len(parts) == 2:
-                    name = CS.name_from_token(parts[1])
-                    cmline = CS.get(name)
-                    if cmline is None:
-                        sock.sendall(b"ERR No such command\n")
-                        continue
-                    try:
-                        res = subprocess.run(
-                            cmline,
-                            shell=True,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            timeout=10,
-                        )
-                        output = res.stdout.rstrip()
-                        if output:
-                            sock.sendall((output + "\n").encode())
-                        sock.sendall(f"EXIT {res.returncode}\n".encode())
-                    except Exception as e:
-                        sock.sendall(f"ERR exec failed: {e}\n".encode())
-                    continue
-
-                # reload ----------------------------------------------
-                if cmd == "reload" and len(parts) == 1:
-                    try:
-                        reload_config()
-                        sock.sendall(b"RELOADED\n")
-                    except Exception as e:
-                        sock.sendall(f"ERR reload failed: {e}\n".encode())
-                    continue
-
-                # restart ---------------------------------------------
-                if cmd == "restart" and len(parts) == 2:
-                    target = parts[1].lower()
-                    if target == "all":
-                        TM.restart_all()
-                        sock.sendall(b"RESTART ALL\n")
-                    else:
-                        name = TM.name_from_token(target)
-                        if name not in TM.procs:
-                            sock.sendall(b"ERR No such thread\n")
-                        else:
-                            TM.restart_thread(name)
-                            sock.sendall(f"RESTART {name}\n".encode())
-                    continue
-
-                # stop -------------------------------------------------
-                if cmd == "stop" and len(parts) == 2:
-                    target = parts[1].lower()
-                    if target == "all":
-                        TM.stop_all(manual=True)
-                        sock.sendall(b"STOP ALL\n")
-                    else:
-                        name = TM.name_from_token(target)
-                        if name not in TM.procs:
-                            sock.sendall(b"ERR No such thread\n")
-                        else:
-                            TM.stop_thread(name)
-                            sock.sendall(f"STOP {name}\n".encode())
-                    continue
-
-                # start -----------------------------------------------
-                if cmd == "start" and len(parts) == 2:
-                    target = parts[1].lower()
-                    if target == "all":
-                        TM.start_all()
-                        sock.sendall(b"START ALL\n")
-                    else:
-                        name = TM.name_from_token(target)
-                        if name not in TM.procs:
-                            sock.sendall(b"ERR No such thread\n")
-                        else:
-                            TM.start_thread(name)
-                            sock.sendall(f"START {name}\n".encode())
-                    continue
-
-                # unknown ---------------------------------------------
-                sock.sendall(b"ERR Unknown command\n")
+                if not raw: break
+                line=raw.decode().strip()
+                if not line: continue
+                await self.dispatch(line)
         finally:
-            Broadcaster.remove_listener(sock)
-            self.server.connections.discard(sock)
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            sock.close()
+            await BCAST.remove(self.w)
+            self.w.close()
+            await self.w.wait_closed()
 
+    async def send(self,data:str):
+        self.w.write(data.encode())
+        await self.w.drain()
 
-# ─────────────────────────── TCP Server class ─────────────────────────
-class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+    # ───────── command dispatch ─────────
+    async def dispatch(self,line:str):
+        parts=line.split()
+        cmd=parts[0].lower()
 
-    def __init__(self, *a, **kw):
-        super().__init__(*a, **kw)
-        self.connections: Set[socket.socket] = set()
+        if cmd=="help":
+            await self.send(HELP_TEXT); return
+        if cmd=="list":
+            await self._cmd_list(parts); return
+        if cmd in {"status","info"}:
+            await self._cmd_statusinfo(cmd,parts); return
+        if cmd=="stream":
+            await self._cmd_stream(parts); return
+        if cmd=="exec":
+            await self._cmd_exec(parts); return
+        if cmd=="reload":
+            await self._cmd_reload(parts); return
+        if cmd in {"start","stop","restart"}:
+            await self._cmd_lifecycle(cmd,parts); return
+        await self.send("ERR Unknown command\n")
 
+    # --- sub-commands ---------------------------------------------------
+    async def _cmd_list(self,parts):
+        if len(parts)==1:
+            await self.send("\n".join(self.pm.list_names())+"\n"); return
+        topic=parts[1]
+        if topic=="status":
+            d=self.pm.status(); await self.send("\n".join(f"{k}: {v}" for k,v in d.items())+"\n")
+        elif topic=="info":
+            d=self.pm.info();   await self.send("\n".join(f"{k}: {v}" for k,v in d.items())+"\n")
+        elif topic=="commands":
+            await self.send("\n".join(self.cs.list_names())+"\n")
+        elif topic=="settings":
+            await self.send("\n".join(f"{k}: {v}" for k,v in self.settings)+"\n")
+        elif topic=="stream" and len(parts)>2 and parts[2]=="all":
+            await BCAST.add(self.w,"ALL"); self.subscribed=True
+            await self.send("STREAM ALL\n")
+        else:
+            await self.send("ERR Unknown list subcommand\n")
 
-# ───────────────────────── debug ticker ───────────────────────────────
-def _debug_loop():
-    while not STOP_EVENT.is_set():
-        sys.stderr.write(
-            DEBUG_LINE_TEMPLATE.format(
-                run=TM.running_count(),
-                rst=TM.restarts_total(),
-                tx=Broadcaster.sent_bytes(),
-                drop=Broadcaster.dropped_bytes(),
-            )
-            + "\n"
-        )
-        sys.stderr.flush()
-        time.sleep(1)
+    async def _cmd_statusinfo(self,which,parts):
+        if len(parts)==1:
+            func=self.pm.status if which=="status" else self.pm.info
+            d=func(); await self.send("\n".join(f"{k}: {v}" for k,v in d.items())+"\n"); return
+        name=self.pm.name_from_token(parts[1])
+        func=self.pm.status if which=="status" else self.pm.info
+        d=func(name); k,v=next(iter(d.items()))
+        await self.send(f"{k}: {v}\n")
 
+    async def _cmd_stream(self,parts):
+        if len(parts)!=3:
+            await self.send("ERR stream <targets> <stdout|stderr|all>\n"); return
+        tgt_str, spec = parts[1], parts[2]
+        if spec not in {"stdout","stderr","all"}:
+            tgt_str, spec = parts[2], parts[1]
+            if spec not in {"stdout","stderr","all"}:
+                await self.send("ERR stream <targets> <stdout|stderr|all>\n"); return
 
-# ────────────────────────── reload helper ─────────────────────────────
-def reload_config():
-    """Stop running threads, reread config, rebuild TM/CS/settings."""
-    global TM, CS, SETTINGS_LIST
+        # build subscription set
+        if tgt_str=="*":
+            subs="ALL"
+        else:
+            names=self.pm.list_names()
+            wanted:set[Tuple[str,str]]=set()
+            for pattern in tgt_str.split(","):
+                pattern=pattern.strip()
+                if not pattern: continue
+                if pattern=="*":
+                    subs="ALL"; break
+                if any(x in pattern for x in "*?[]"):
+                    matched=[n for n in names if fnmatch.fnmatch(n,pattern)]
+                else:
+                    matched=[self.pm.name_from_token(pattern)]
+                for n in matched:
+                    if n not in self.pm.procs: continue
+                    if spec=="all":
+                        wanted.update({(n,"stdout"),(n,"stderr")})
+                    else:
+                        wanted.add((n,spec))
+            else:
+                subs=wanted
+        await BCAST.add(self.w, subs)
+        self.subscribed=True
+        await self.send(f"STREAM {tgt_str} {spec}\n")
 
-    TM.shutdown()
-    TM.stop_all()
-    new_TM, new_CS, new_SETTINGS = init_from_config(CONFIG_PATH, DEBUG_ENABLED)
-    TM, CS, SETTINGS_LIST = new_TM, new_CS, new_SETTINGS
-    TM.start_all()
+    async def _cmd_exec(self,parts):
+        if len(parts)!=2:
+            await self.send("ERR exec <name|index>\n"); return
+        name=self.cs.name_from_token(parts[1])
+        cmd=self.cs.get(name)
+        if cmd is None:
+            await self.send("ERR No such command\n"); return
+        try:
+            # Python 3.9 – no text=True
+            p=await asyncio.create_subprocess_shell(cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT)
+            out,_=await asyncio.wait_for(p.communicate(),timeout=10)
+            output=out.decode(errors="replace")
+            if output: await self.send(output.rstrip()+"\n")
+            await self.send(f"EXIT {p.returncode}\n")
+        except Exception as e:
+            await self.send(f"ERR exec failed: {e}\n")
 
+    async def _cmd_reload(self,_):
+        try:
+            await reload_config()
+            await self.send("RELOADED\n")
+        except Exception as e:
+            await self.send(f"ERR reload failed: {e}\n")
 
-# ────────────────────────────────── main ──────────────────────────────
-def main():
-    global DEBUG_ENABLED, TM, CS, SETTINGS_LIST, CONFIG_PATH
+    async def _cmd_lifecycle(self,cmd,parts):
+        if len(parts)!=2:
+            await self.send(f"ERR {cmd} <thread|idx|all>\n"); return
+        tgt=parts[1].lower()
+        if tgt=="all":
+            coro=getattr(self.pm,f"{cmd}_all")
+            await coro(); await self.send(f"{cmd.upper()} ALL\n"); return
+        name=self.pm.name_from_token(tgt)
+        if name not in self.pm.procs:
+            await self.send("ERR No such thread\n"); return
+        coro=getattr(self.pm,f"{cmd}_thread")
+        await coro(name)
+        await self.send(f"{cmd.upper()} {name}\n")
 
-    if os.geteuid() != 0:
+# ───────────────────── reload helper ───────────────────────────────
+async def reload_config():
+    global PM,CS,SETTINGS_LIST
+    await PM.shutdown()
+    PM,CS,SETTINGS_LIST = await load_config(CONFIG_PATH, DEBUG_ENABLED)
+    await PM.start_all()
+
+# ───────────────────── main ─────────────────────────────────────────
+PM: ProcessManager
+CS: CommandSet
+SETTINGS_LIST: List[Tuple[str,str]]
+CONFIG_PATH=""
+DEBUG_ENABLED=False
+CLIENTS: set[asyncio.StreamWriter] = set() 
+
+async def main():
+    global PM,CS,SETTINGS_LIST,CONFIG_PATH,DEBUG_ENABLED
+
+    if os.geteuid()!=0:
         sys.exit("Must be run as root (sudo).")
 
-    pa = argparse.ArgumentParser()
-    pa.add_argument("--config", required=True, help="Path to profile")
-    pa.add_argument("--debug", action="store_true")
-    pa.add_argument("--port", type=int, default=9500)
-    args = pa.parse_args()
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--config",required=True,help="Path to profile")
+    ap.add_argument("--debug",action="store_true")
+    ap.add_argument("--port",type=int,default=9500)
+    args=ap.parse_args()
 
-    DEBUG_ENABLED = args.debug
-    CONFIG_PATH = args.config
+    DEBUG_ENABLED=args.debug
+    CONFIG_PATH=args.config
+    logging.basicConfig(level=logging.DEBUG if DEBUG_ENABLED else logging.INFO,
+                        format=LOG_FMT)
 
-    TM, CS, SETTINGS_LIST = init_from_config(CONFIG_PATH, DEBUG_ENABLED, first_run=True)
-    TM.start_all()
+    PM,CS,SETTINGS_LIST = await load_config(CONFIG_PATH, DEBUG_ENABLED)
+    await PM.start_all()
 
-    if DEBUG_ENABLED:
-        threading.Thread(target=_debug_loop, daemon=True).start()
-
-    server = ThreadedTCPServer(("0.0.0.0", args.port), CommandHandler)
-
-    def shutdown(sig, frm):
-        dlog("signal received, shutting down …")
-        if STOP_EVENT.is_set():
+    async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        # real-time limit: count *connected* clients, not all asyncio tasks
+        if len(CLIENTS) >= MAX_CONNECTIONS:
+            writer.write(b"ERR Too many connections\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
             return
-        STOP_EVENT.set()
-        for s in list(server.connections):
-            try:
-                s.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            s.close()
-        threading.Thread(target=server.shutdown, daemon=True).start()
-        TM.shutdown()
-        TM.stop_all()
-        dlog("bye!")
-        time.sleep(0.5)
-        os._exit(0)
 
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+        CLIENTS.add(writer)
+        try:
+            session = ClientSession(reader, writer, PM, CS, SETTINGS_LIST)
+            await session.run()
+        finally:
+            CLIENTS.discard(writer)          # always release the slot
 
+    server=await asyncio.start_server(on_client,"0.0.0.0",args.port)
+    logger.info("Listening on port %d",args.port)
+
+    stop_evt=asyncio.Event()
+    loop=asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_evt.set)
+
+    await stop_evt.wait()
+    logger.info("Shutting down …")
+    server.close(); await server.wait_closed()
+    await PM.shutdown()
+
+if __name__=="__main__":
     try:
-        server.serve_forever()
+        asyncio.run(main())
     except KeyboardInterrupt:
-        shutdown(signal.SIGINT, None)
-
-
-if __name__ == "__main__":
-    main()
+        pass
