@@ -1,129 +1,222 @@
-<!doctype html><html lang=en><head>
-  <meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-  <title>Thread-Manager</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>:root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
-  *{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-  header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
-  header h1{margin:0;font-size:1rem}button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
-  .statsline{font-size:.9rem;width:100%;margin-top:.2rem}
-  .tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
-  .tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
-  .tab.active{background:#fff;border-bottom:3px solid var(--accent)}
-  section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
-  .thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
-  .chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
-  .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
-  .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
-  canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
-  .cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
-  #cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
-  .collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background 0.2s;padding:.25rem;border-radius:4px}
-  .collapsible-title:hover{background:#d0e4ff}
-  .collapsible-body{overflow:hidden;transition:max-height 0.3s ease-out;margin-top:.5rem;max-height:1000px}
-  .collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
-  .collapsible.collapsed .collapsible-title::after{content:' [+]'}
-  .collapsible-title::after{content:' [\2013]';float:right}</style>
-</head><body>
-<header><h1>Thread-Manager</h1>
-  <button id=mode class=btn>STATS</button>
-  <button id=refresh class=btn>REF 1000ms</button>
-  <button id=cmdToggle class=btn>COMMANDS</button>
-  <div id=bytesline class=statsline></div>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Thread-Manager</title>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+:root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
+header h1{margin:0;font-size:1rem}
+button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
+.statsline{font-size:.9rem;width:100%;margin-top:.2rem}
+.tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
+.tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
+.tab.active{background:#fff;border-bottom:3px solid var(--accent)}
+section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
+.thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
+.chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
+.card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
+.card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
+canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
+.cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
+#cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
+.collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background .2s;padding:.25rem;border-radius:4px}
+.collapsible-title:hover{background:#d0e4ff}
+.collapsible-body{overflow:hidden;transition:max-height .3s ease-out;margin-top:.5rem;max-height:1000px}
+.collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
+.collapsible.collapsed .collapsible-title::after{content:' [+]'}
+.collapsible-title::after{content:' [\2013]';float:right}
+</style>
+
+<!-- Global Chart.js tweaks -->
+<script>
+Chart.defaults.plugins.decimation = {           // medium tweak: down-sample before draw
+  enabled: true,
+  algorithm: 'lttb',
+  samples: 50
+};
+</script>
+</head>
+
+<body>
+<header>
+  <h1>Thread-Manager</h1>
+  <button id="mode"    class="btn">STATS</button>
+  <button id="refresh" class="btn">REF 1000ms</button>
+  <button id="cmdToggle" class="btn">COMMANDS</button>
+  <div id="bytesline" class="statsline"></div>
 </header>
 
-<div id=metrics>
-  <div class=tabs>
-    <button class="tab active" data-tab=rx>RX</button>
-    <button class=tab data-tab=tx>TX</button>
+<div id="metrics">
+  <div class="tabs">
+    <button class="tab active" data-tab="rx">RX</button>
+    <button class="tab"        data-tab="tx">TX</button>
   </div>
-  <section id=rx class="tab-content active"></section>
-  <section id=tx class="tab-content"></section>
+  <section id="rx" class="tab-content active"></section>
+  <section id="tx" class="tab-content"></section>
 </div>
-<section id=commands style="display:none"></section>
+
+<section id="commands" style="display:none"></section>
 
 <script>
-const MAX=100;
-const pool=['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
-const colour=i=>pool[i%pool.length];
-const charts=new Map(), wrappers=new Map();
-const ckey=(tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
-const ERR_KEYS=['bad','lost','rec','dec'], THR_KEYS=['all','out','uniq'];
+/* ---------- constants & helpers ---------- */
+const MAX   = 100;
+const pool  = ['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
+const colour = i => pool[i % pool.length];
+const charts   = new Map();
+const wrappers = new Map();
+const ckey = (tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
+const ERR_KEYS = ['bad','lost','rec','dec'];
+const THR_KEYS = ['all','out','uniq'];
 
-// track repeat counts per tab/container/antenna and per container PKT
-const statsState = {};
-
+/* state */
 let mode='graphs', view='metrics';
-const ints=[200,400,600,800,1000]; let idx=4; let timer;
-const modeBtn=document.getElementById('mode'), refBtn=document.getElementById('refresh'), bytesLine=document.getElementById('bytesline');
+const ints=[200,400,600,800,1000]; let idx=4;
+let timer, ctrl=null;                  // ctrl = AbortController for fetch
+const statsState = {};                 // per-tab repeat counters
+
+/* quick win: pause when tab is hidden */
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden) clearTimeout(timer);
+  else sched();
+});
+
+/* ---------- DOM controls ---------- */
+const modeBtn   = document.getElementById('mode');
+const refBtn    = document.getElementById('refresh');
+const bytesLine = document.getElementById('bytesline');
+
 modeBtn.onclick = () => {
   if (view === 'commands') toggleCmd(false);
-  // flip mode
-  mode = mode === 'stats' ? 'graphs' : 'stats';
-  modeBtn.textContent = mode === 'stats' ? 'GRAPHS' : 'STATS';
+  mode = (mode === 'stats') ? 'graphs' : 'stats';
+  modeBtn.textContent = (mode === 'stats') ? 'GRAPHS' : 'STATS';
 
-  // when going *into* graph mode, remove all old chart wrappers
-  if (mode === 'graphs') {
-    // remove each chart DIV from DOM
+  if (mode === 'graphs') {             // drop old charts when re-entering graph mode
     wrappers.forEach(wrap => wrap.remove());
-    // clear our maps so renderStrip will re-create them
-    wrappers.clear();
-    charts.clear();
+    wrappers.clear(); charts.clear();
   }
-
   refresh();
 };
-refBtn.onclick=()=>{idx=(idx+1)%ints.length;refBtn.textContent=`REF ${ints[idx]}ms`;sched();}
-document.getElementById('cmdToggle').onclick=()=>toggleCmd(view!=='commands');
+
+refBtn.onclick = () => {
+  idx = (idx + 1) % ints.length;
+  refBtn.textContent = `REF ${ints[idx]}ms`;
+  sched();
+};
+
+document.getElementById('cmdToggle').onclick = () => toggleCmd(view!=='commands');
+
 function toggleCmd(en){
-  if(en){view='commands';metrics.style.display='none';commands.style.display='';if(!commands.hasChildNodes())loadCmd();}
-  else {view='metrics';metrics.style.display='';commands.style.display='none';}
+  const metrics = document.getElementById('metrics');
+  const commands= document.getElementById('commands');
+  if(en){
+    view='commands';
+    metrics.style.display='none';
+    commands.style.display='';
+    if(!commands.hasChildNodes()) loadCmd();
+  }else{
+    view='metrics';
+    metrics.style.display='';
+    commands.style.display='none';
+  }
 }
-document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));
-  document.querySelectorAll('.tab-content').forEach(s=>s.classList.toggle('active',s.id===b.dataset.tab));
+
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t===b));
+  document.querySelectorAll('.tab-content').forEach(s => s.classList.toggle('active', s.id===b.dataset.tab));
 });
-function sched(){clearTimeout(timer);if(view==='metrics')refresh();timer=setTimeout(sched,ints[idx]);}sched();
 
-async function refresh(){
-  const r=await fetch('/metrics'); if(!r.ok) return;
-  const data=await r.json();
-  let inB=0,outB=0;
-  Object.values(data).forEach(t=>{const p=t.PKT.at(-1); if(p){inB+=p.count_b_all;outB+=p.count_b_outgoing;}});
-  bytesLine.textContent=`Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
-  drawTab('rx',data,'RX_ANT',s=>s.rssi.rssi_avg);
-  drawTab('tx',data,'TX_ANT',s=>s.latency.lat_avg);
+/* ---------- scheduler ---------- */
+function sched(){
+  clearTimeout(timer);
+  if(view==='metrics') refresh();
+  timer = setTimeout(sched, ints[idx]);
+}
+sched();
+
+/* ---------- chart flush batching (medium tweak) ---------- */
+const dirtyCharts = new Set();
+let   chartFlushScheduled = false;
+
+function markDirty(chart){
+  dirtyCharts.add(chart);
+  if(!chartFlushScheduled){
+    chartFlushScheduled = true;
+    requestAnimationFrame(()=>{
+      dirtyCharts.forEach(c => c.update('none'));
+      dirtyCharts.clear();
+      chartFlushScheduled = false;
+    });
+  }
 }
 
-function drawTab(tabId,data,antKey,ySel){
+/* ---------- MAIN REFRESH ---------- */
+async function refresh(){
+  try{
+    if(ctrl) ctrl.abort();                       // quick win: cancel overlapping fetch
+    ctrl = new AbortController();
+
+    const r = await fetch('/metrics',{signal:ctrl.signal});
+    if(!r.ok) return;
+    const data = await r.json();
+
+    let inB=0,outB=0;
+    Object.values(data).forEach(t=>{
+      const p=t.PKT.at(-1);
+      if(p){ inB+=p.count_b_all; outB+=p.count_b_outgoing; }
+    });
+    bytesLine.textContent = `Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
+
+    drawTab('rx', data, 'RX_ANT', s=>s.rssi.rssi_avg);
+    drawTab('tx', data, 'TX_ANT', s=>s.latency.lat_avg);
+  }catch(e){
+    if(e.name!=='AbortError') console.error(e);
+  }
+}
+
+/* ---------- TAB renderer ---------- */
+function drawTab(tabId, data, antKey, ySel){
   const cont=document.getElementById(tabId);
   if(!statsState[tabId]) statsState[tabId]={};
 
+  /* --- STATS mode --- */
   if(mode==='stats'){
-    cont.innerHTML='';
-    const tabState=statsState[tabId];
+    const frag = document.createDocumentFragment();     // quick win: build off-DOM
+    const tabState = statsState[tabId];
 
     Object.entries(data).forEach(([container,kinds])=>{
       if(!kinds[antKey]?.length) return;
       if(!tabState[container]) tabState[container]={pktTs:null,pktCount:0,ants:{}};
       const contState=tabState[container];
 
-      // heading
-      cont.innerHTML+=`<div class="thread">${container}</div>`;
+      /* heading */
+      const th=document.createElement('div');
+      th.className='thread';
+      th.textContent=container;
+      frag.appendChild(th);
 
       let cardHtml='';
 
-      // PKT summary
+      /* PKT summary */
       if(kinds.PKT?.length){
         const p=kinds.PKT.at(-1);
         if(p.ts===contState.pktTs) contState.pktCount++;
         else { contState.pktTs=p.ts; contState.pktCount=0; }
+
         if(contState.pktCount<3){
           const hl=contState.pktCount>0?'background:yellow;':'';
           cardHtml+=`<span style="${hl}">PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}</span>\n`;
         }
       }
 
-      // latest per-antenna
+      /* latest per-antenna */
       const latestByAnt={};
       kinds[antKey].forEach(s=>latestByAnt[s.antenna_id]=s);
 
@@ -133,7 +226,8 @@ function drawTab(tabId,data,antKey,ySel){
         if(s.ts===antSt.ts) antSt.count++;
         else { antSt.ts=s.ts; antSt.count=0; }
         contState.ants[antenna_id]=antSt;
-        if(antSt.count>=3) return;
+        if(antSt.count>=3) return;                // skip spam
+
         const hl=antSt.count>0?'background:yellow;':'';
         if(s.latency){
           cardHtml+=`<span style="${hl}">A: ${s.antenna_id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.lat_avg} ms | lat_min=${s.latency.lat_min} ms | lat_max=${s.latency.lat_max} ms</span>\n`;
@@ -143,84 +237,143 @@ function drawTab(tabId,data,antKey,ySel){
         }
       });
 
-      cont.innerHTML+=`<div class="card" style="white-space:pre-wrap;font-family:monospace">
-${cardHtml.trim()}
-</div>`;
+      const card=document.createElement('div');
+      card.className='card';
+      card.style.whiteSpace='pre-wrap';
+      card.style.fontFamily='monospace';
+      card.innerHTML = cardHtml.trim();
+      frag.appendChild(card);
     });
+
+    cont.replaceChildren(frag);
     return;
   }
-    
-    
+
+  /* --- GRAPHS mode --- */
   cont.querySelectorAll('.thread,.card').forEach(el=>el.remove());
-  for(const[thr,kinds]of Object.entries(data)){
-    if(!kinds[antKey]?.length)continue;
-    renderStrip(tabId,thr,'ant',`${thr} – ANTENNA`,kinds[antKey],s=>s.antenna_id,v=>v.at(-1),ySel);
+
+  for(const[thr,kinds] of Object.entries(data)){
+    if(!kinds[antKey]?.length) continue;
+    renderStrip(tabId, thr, 'ant', `${thr} – ANTENNA`, kinds[antKey], s=>s.antenna_id,
+                v=>v.at(-1), ySel);
     if(kinds.PKT?.length){
-      renderStrip(tabId,thr,'err',`${thr} – ERRORS`,[kinds.PKT.at(-1)],()=>1,p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),null,{min:0},ERR_KEYS);
-      renderStrip(tabId,thr,'thr',`${thr} – THROUGHPUT`,[kinds.PKT.at(-1)],()=>1,p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),null,{min:0},THR_KEYS);}}
+      renderStrip(tabId, thr, 'err', `${thr} – ERRORS`,
+                  [kinds.PKT.at(-1)], ()=>1,
+                  p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),
+                  null,{min:0}, ERR_KEYS);
+      renderStrip(tabId, thr, 'thr', `${thr} – THROUGHPUT`,
+                  [kinds.PKT.at(-1)], ()=>1,
+                  p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),
+                  null,{min:0}, THR_KEYS);
+    }
+  }
 }
 
+/* ---------- chart strip renderer ---------- */
 function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
-  const id=ckey(tab,thr,sfx);let wrap=wrappers.get(id);
+  const id=ckey(tab,thr,sfx);
+  let wrap=wrappers.get(id);
+
+  /* create wrapper & chart first time */
   if(!wrap){
-    wrap=document.createElement('div');wrap.className='chart';
-    wrap.innerHTML=`<div class=chart-title>${title}</div><canvas></canvas>`;
+    wrap=document.createElement('div');
+    wrap.className='chart';
+    wrap.innerHTML=`<div class="chart-title">${title}</div><canvas></canvas>`;
     document.getElementById(tab).appendChild(wrap);
     const ctx=wrap.querySelector('canvas');
-    charts.set(id,new Chart(ctx,{type:'line',data:{labels:[...Array(MAX).keys()],datasets:[]},
-      options:{animation:false,responsive:true,maintainAspectRatio:false,spanGaps:true,
-               elements:{point:{radius:0}},
-               scales:{x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}},
-                       y:{beginAtZero:true,ticks:{precision:0,callback:v=>v},...yExtra}},
-               plugins:{legend:{display:true,position:'bottom'}}}}));
-    wrappers.set(id,wrap);}
-  const chart=charts.get(id);
-  let dSets=[], index=0;
-  if(sfx==='ant'){
-    const groups={};samples.forEach(s=>(groups[keyFn(s)]??=[]).push(ySel(s)));
-    Object.keys(groups).sort().forEach(lab=>{let ds=chart.data.datasets.find(d=>d.label===lab);
-      if(!ds)ds={label:lab,borderColor:colour(index),backgroundColor:colour(index),tension:0,fill:false,data:Array(MAX).fill(null)};
-      ds.data.push(valFn(groups[lab]));if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);index++;});
-  }else{
-    const obj=valFn(samples.at(-1));(fixedOrder||Object.keys(obj).sort()).forEach(lab=>{let ds=chart.data.datasets.find(d=>d.label===lab);
-      if(!ds)ds={label:lab,borderColor:colour(index),backgroundColor:colour(index),tension:0,fill:false,data:Array(MAX).fill(null)};
-      ds.data.push(obj[lab]);if(ds.data.length>MAX)ds.data.shift();dSets.push(ds);index++;});
+
+    charts.set(id,new Chart(ctx,{
+      type:'line',
+      data:{labels:[...Array(MAX).keys()],datasets:[]},
+      options:{
+        animation:false,
+        responsive:true,
+        maintainAspectRatio:false,
+        spanGaps:true,
+        elements:{point:{radius:0}},
+        scales:{
+          x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}},
+          y:{beginAtZero:true,ticks:{precision:0,callback:v=>v},...yExtra}
+        },
+        plugins:{legend:{display:true,position:'bottom'}}
+      }
+    }));
+    wrappers.set(id,wrap);
   }
-  chart.data.datasets=dSets;chart.update('none');
+
+  const chart = charts.get(id);
+
+  /* ---- mutate existing datasets instead of replacing (quick win) ---- */
+  const used = new Set();                       // track which labels we saw this tick
+
+  if(sfx==='ant'){
+    const groups={};
+    samples.forEach(s => (groups[keyFn(s)] ??= []).push(ySel(s)));
+
+    Object.keys(groups).sort().forEach((lab,idx)=>{
+      let ds = chart.data.datasets.find(d=>d.label===lab);
+      if(!ds){
+        ds = {label:lab,borderColor:colour(idx),backgroundColor:colour(idx),
+              tension:0,fill:false,data:Array(MAX).fill(null)};
+        chart.data.datasets.push(ds);
+      }
+      ds.data.push(valFn(groups[lab]));
+      if(ds.data.length>MAX) ds.data.shift();
+      used.add(ds);
+    });
+  }else{
+    const obj = valFn(samples.at(-1));
+    (fixedOrder||Object.keys(obj).sort()).forEach((lab,idx)=>{
+      let ds = chart.data.datasets.find(d=>d.label===lab);
+      if(!ds){
+        ds = {label:lab,borderColor:colour(idx),backgroundColor:colour(idx),
+              tension:0,fill:false,data:Array(MAX).fill(null)};
+        chart.data.datasets.push(ds);
+      }
+      ds.data.push(obj[lab]);
+      if(ds.data.length>MAX) ds.data.shift();
+      used.add(ds);
+    });
+  }
+
+  /* remove datasets that disappeared */
+  chart.data.datasets = chart.data.datasets.filter(d => used.has(d));
+
+  markDirty(chart);                              // medium tweak: batch redraws
 }
 
+/* ---------- COMMANDS section (unchanged except minor tidy) ---------- */
 async function loadCmd(){
   const sec=document.getElementById('commands');
   sec.innerHTML='<p>Loading…</p>';
   try{
     const cmds = await (await fetch('/commands')).json();
     const groups = { settings: [], gs: [], vtx: [], other: [] };
-    cmds.forEach(cmd => {
+    cmds.forEach(cmd=>{
       if(cmd.startsWith('settings_')) groups.settings.push(cmd);
-      else if(cmd.startsWith('gs_')) groups.gs.push(cmd);
+      else if(cmd.startsWith('gs_'))  groups.gs.push(cmd);
       else if(cmd.startsWith('vtx_')) groups.vtx.push(cmd);
       else groups.other.push(cmd);
     });
-    function makeBlock(title, list) {
-      if (!list.length) return '';
-      const btns = list.map(c=>`<button class=cmd-btn data-cmd="${c}">${c}</button>`).join('');
-      return `
-        <div class="card collapsible collapsed">
-          <div class="collapsible-title">${title}</div>
-          <div class="collapsible-body">${btns}</div>
-        </div>`;
+    function makeBlock(title,list){
+      if(!list.length) return '';
+      const btns=list.map(c=>`<button class="cmd-btn" data-cmd="${c}">${c}</button>`).join('');
+      return `<div class="card collapsible collapsed">
+                <div class="collapsible-title">${title}</div>
+                <div class="collapsible-body">${btns}</div>
+              </div>`;
     }
     sec.innerHTML =
-      makeBlock('Settings', groups.settings) +
-      makeBlock('Groundstation', groups.gs) +
-      makeBlock('VTX', groups.vtx) +
-      makeBlock('Other', groups.other) +
-      '<div id=cmd-out></div>';
-    sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=exec);
+      makeBlock('Settings',     groups.settings)+
+      makeBlock('Groundstation',groups.gs)+
+      makeBlock('VTX',          groups.vtx)+
+      makeBlock('Other',        groups.other)+
+      '<div id="cmd-out"></div>';
+
+    sec.querySelectorAll('.cmd-btn').forEach(b => b.onclick = exec);
     sec.querySelectorAll('.collapsible-title').forEach(t =>
-      t.onclick = () => t.parentElement.classList.toggle('collapsed')
-    );
-  } catch(e){
+      t.onclick = () => t.parentElement.classList.toggle('collapsed'));
+  }catch(e){
     sec.innerHTML = `<p style="color:red">ERROR ${e}</p>`;
   }
 }
@@ -231,11 +384,17 @@ async function exec(e){
   const out=document.getElementById('cmd-out');
   out.textContent='…';
   try{
-    const j=await(await fetch('/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})})).json();
+    const j=await(await fetch('/exec',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cmd})
+    })).json();
     out.textContent=j.output;
-  } catch(err){
+  }catch(err){
     out.textContent='ERROR '+err;
   }
   b.disabled=false;
 }
-</script></body></html>
+</script>
+</body>
+</html>
