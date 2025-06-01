@@ -1,400 +1,544 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Thread-Manager</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Thread-Manager</title>
 
-<!-- Chart.js -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<style>
-:root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
-*{box-sizing:border-box}
-body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
-header h1{margin:0;font-size:1rem}
-button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
-.statsline{font-size:.9rem;width:100%;margin-top:.2rem}
-.tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
-.tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
-.tab.active{background:#fff;border-bottom:3px solid var(--accent)}
-section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
-.thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
-.chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
-.card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
-.card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
-canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
-.cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
-#cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
-.collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background .2s;padding:.25rem;border-radius:4px}
-.collapsible-title:hover{background:#d0e4ff}
-.collapsible-body{overflow:hidden;transition:max-height .3s ease-out;margin-top:.5rem;max-height:1000px}
-.collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
-.collapsible.collapsed .collapsible-title::after{content:' [+]'}
-.collapsible-title::after{content:' [\2013]';float:right}
-</style>
+  <style>
+    :root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+    header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
+    header h1{margin:0;font-size:1rem}
+    button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
+    .statsline{font-size:.9rem;width:100%;margin-top:.2rem}
+    .tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
+    .tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
+    .tab.active{background:#fff;border-bottom:3px solid var(--accent)}
+    section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
+    .thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
+    .chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
+    .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
+    .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
+    canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
+    .cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
+    #cmd-out{background:#000;color:#0f0;font-family:monospace;font-size:.8rem;padding:.5rem;border-radius:6px;min-height:1.2rem;margin-top:.5rem;white-space:pre-wrap}
+    .collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background .2s;padding:.25rem;border-radius:4px}
+    .collapsible-title:hover{background:#d0e4ff}
+    .collapsible-body{overflow:hidden;transition:max-height .3s ease-out;margin-top:.5rem;max-height:1000px}
+    .collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
+    .collapsible.collapsed .collapsible-title::after{content:' [+]'}
+    .collapsible-title::after{content:' [\2013]';float:right}
+    /* MAVLINK section styles */
+    #mavlink .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
+    #mavlink .status-box, #mavlink .exec-box{background:var(--card);border-radius:6px;box-shadow:0 1px 3px #0002;padding:.5rem .7rem;margin:.5rem 0;font-family:monospace;font-size:.8rem;white-space:pre-wrap}
+  </style>
 
-<!-- Global Chart.js tweaks -->
-<script>
-Chart.defaults.plugins.decimation = {           // medium tweak: down-sample before draw
-  enabled: true,
-  algorithm: 'lttb',
-  samples: 50
-};
-</script>
+  <!-- Global Chart.js tweaks -->
+  <script>
+    Chart.defaults.plugins.decimation = {
+      enabled: true,
+      algorithm: 'lttb',
+      samples: 50
+    };
+  </script>
 </head>
 
 <body>
-<header>
-  <h1>Thread-Manager</h1>
-  <button id="mode"    class="btn">STATS</button>
-  <button id="refresh" class="btn">REF 1000ms</button>
-  <button id="cmdToggle" class="btn">COMMANDS</button>
-  <div id="bytesline" class="statsline"></div>
-</header>
+  <header>
+    <h1>Thread-Manager</h1>
+    <button id="mode"    class="btn">STATS</button>
+    <button id="mavBtn"  class="btn">MAVLINK</button>
+    <button id="cmdToggle" class="btn">COMMANDS</button>
+    <div id="bytesline" class="statsline"></div>
+  </header>
 
-<div id="metrics">
-  <div class="tabs">
-    <button class="tab active" data-tab="rx">RX</button>
-    <button class="tab"        data-tab="tx">TX</button>
+  <div id="metrics">
+    <div class="tabs">
+      <button class="tab active" data-tab="rx">RX</button>
+      <button class="tab"        data-tab="tx">TX</button>
+    </div>
+    <section id="rx" class="tab-content active"></section>
+    <section id="tx" class="tab-content"></section>
   </div>
-  <section id="rx" class="tab-content active"></section>
-  <section id="tx" class="tab-content"></section>
-</div>
 
-<section id="commands" style="display:none"></section>
+  <section id="commands" style="display:none"></section>
+  <section id="mavlink" style="display:none">
+    <div class="chart bar-chart-container">
+      <div class="bar-chart-title">RC_CHANNELS_OVERRIDE (Channels 1–16)</div>
+      <canvas id="channelsBarChart"></canvas>
+    </div>
+    <div class="status-box" id="radioStatusBox">Loading RADIO_STATUS…</div>
+    <div class="exec-box"   id="execBox">Loading MAVLINK_EXEC…</div>
+  </section>
 
-<script>
-/* ---------- constants & helpers ---------- */
-const MAX   = 100;
-const pool  = ['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
-const colour = i => pool[i % pool.length];
-const charts   = new Map();
-const wrappers = new Map();
-const ckey = (tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
-const ERR_KEYS = ['bad','lost','rec','dec'];
-const THR_KEYS = ['all','out','uniq'];
+  <script>
+    /* ---------- constants & helpers ---------- */
+    const MAX   = 100;
+    const pool  = ['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
+    const colour = i => pool[i % pool.length];
+    const charts   = new Map();
+    const wrappers = new Map();
+    const ckey = (tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
+    const ERR_KEYS = ['bad','lost','rec','dec'];
+    const THR_KEYS = ['all','out','uniq'];
 
-/* state */
-let mode='graphs', view='metrics';
-const ints=[200,400,600,800,1000]; let idx=4;
-let timer, ctrl=null;                  // ctrl = AbortController for fetch
-const statsState = {};                 // per-tab repeat counters
+    /* state */
+    let mode = 'graphs', view = 'metrics';
+    let interval = 1000;           // will be overridden by settings.log_interval
+    let timer, ctrl = null;        // ctrl = AbortController for fetch
+    const statsState = {};         // per-tab repeat counters
 
-/* quick win: pause when tab is hidden */
-document.addEventListener('visibilitychange',()=>{
-  if(document.hidden) clearTimeout(timer);
-  else sched();
-});
+    /* MAVLINK-specific state */
+    let mavInitialized = false;
+    let channelsBarChart = null;
 
-/* ---------- DOM controls ---------- */
-const modeBtn   = document.getElementById('mode');
-const refBtn    = document.getElementById('refresh');
-const bytesLine = document.getElementById('bytesline');
-
-modeBtn.onclick = () => {
-  if (view === 'commands') toggleCmd(false);
-  mode = (mode === 'stats') ? 'graphs' : 'stats';
-  modeBtn.textContent = (mode === 'stats') ? 'GRAPHS' : 'STATS';
-
-  if (mode === 'graphs') {             // drop old charts when re-entering graph mode
-    wrappers.forEach(wrap => wrap.remove());
-    wrappers.clear(); charts.clear();
-  }
-  refresh();
-};
-
-refBtn.onclick = () => {
-  idx = (idx + 1) % ints.length;
-  refBtn.textContent = `REF ${ints[idx]}ms`;
-  sched();
-};
-
-document.getElementById('cmdToggle').onclick = () => toggleCmd(view!=='commands');
-
-function toggleCmd(en){
-  const metrics = document.getElementById('metrics');
-  const commands= document.getElementById('commands');
-  if(en){
-    view='commands';
-    metrics.style.display='none';
-    commands.style.display='';
-    if(!commands.hasChildNodes()) loadCmd();
-  }else{
-    view='metrics';
-    metrics.style.display='';
-    commands.style.display='none';
-  }
-}
-
-document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t===b));
-  document.querySelectorAll('.tab-content').forEach(s => s.classList.toggle('active', s.id===b.dataset.tab));
-});
-
-/* ---------- scheduler ---------- */
-function sched(){
-  clearTimeout(timer);
-  if(view==='metrics') refresh();
-  timer = setTimeout(sched, ints[idx]);
-}
-sched();
-
-/* ---------- chart flush batching (medium tweak) ---------- */
-const dirtyCharts = new Set();
-let   chartFlushScheduled = false;
-
-function markDirty(chart){
-  dirtyCharts.add(chart);
-  if(!chartFlushScheduled){
-    chartFlushScheduled = true;
-    requestAnimationFrame(()=>{
-      dirtyCharts.forEach(c => c.update('none'));
-      dirtyCharts.clear();
-      chartFlushScheduled = false;
+    /* quick win: pause when tab is hidden */
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearTimeout(timer);
+      else sched();
     });
-  }
-}
 
-/* ---------- MAIN REFRESH ---------- */
-async function refresh(){
-  try{
-    if(ctrl) ctrl.abort();                       // quick win: cancel overlapping fetch
-    ctrl = new AbortController();
+    /* ---------- DOM controls ---------- */
+    const modeBtn   = document.getElementById('mode');
+    const mavBtn    = document.getElementById('mavBtn');
+    const bytesLine = document.getElementById('bytesline');
 
-    const r = await fetch('/metrics',{signal:ctrl.signal});
-    if(!r.ok) return;
-    const data = await r.json();
+    modeBtn.onclick = () => {
+      if (view !== 'metrics') switchTo('metrics');
+      mode = (mode === 'stats') ? 'graphs' : 'stats';
+      modeBtn.textContent = (mode === 'stats') ? 'GRAPHS' : 'STATS';
 
-    let inB=0,outB=0;
-    Object.values(data).forEach(t=>{
-      const p=t.PKT.at(-1);
-      if(p){ inB+=p.count_b_all; outB+=p.count_b_outgoing; }
+      if (mode === 'graphs') {
+        // Clear old charts
+        wrappers.forEach(wrap => wrap.remove());
+        wrappers.clear(); charts.clear();
+      }
+      refresh();
+    };
+
+    mavBtn.onclick = () => {
+      if (view !== 'mavlink') {
+        switchTo('mavlink');
+      } else {
+        switchTo('metrics');
+      }
+    };
+
+    document.getElementById('cmdToggle').onclick = () => {
+      if (view !== 'commands') {
+        switchTo('commands');
+      } else {
+        switchTo('metrics');
+      }
+    };
+
+    document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === b));
+      document.querySelectorAll('.tab-content').forEach(s => s.classList.toggle('active', s.id === b.dataset.tab));
     });
-    bytesLine.textContent = `Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
 
-    drawTab('rx', data, 'RX_ANT', s=>s.rssi.rssi_avg);
-    drawTab('tx', data, 'TX_ANT', s=>s.latency.lat_avg);
-  }catch(e){
-    if(e.name!=='AbortError') console.error(e);
-  }
-}
+    function switchTo(target) {
+      // Hide all three sections
+      document.getElementById('metrics').style.display = 'none';
+      document.getElementById('commands').style.display = 'none';
+      document.getElementById('mavlink').style.display  = 'none';
 
-/* ---------- TAB renderer ---------- */
-function drawTab(tabId, data, antKey, ySel){
-  const cont=document.getElementById(tabId);
-  if(!statsState[tabId]) statsState[tabId]={};
+      // Show target
+      document.getElementById(target).style.display = '';
+      view = target;
 
-  /* --- STATS mode --- */
-  if(mode==='stats'){
-    const frag = document.createDocumentFragment();     // quick win: build off-DOM
-    const tabState = statsState[tabId];
+      // If entering MAVLINK, init if needed and refresh
+      if (target === 'mavlink') {
+        if (!mavInitialized) initMavlink();
+        refreshMavlink();
+      }
+      // If entering metrics, refresh metrics if needed
+      if (target === 'metrics') {
+        refresh();
+      }
+    }
 
-    Object.entries(data).forEach(([container,kinds])=>{
-      if(!kinds[antKey]?.length) return;
-      if(!tabState[container]) tabState[container]={pktTs:null,pktCount:0,ants:{}};
-      const contState=tabState[container];
-
-      /* heading */
-      const th=document.createElement('div');
-      th.className='thread';
-      th.textContent=container;
-      frag.appendChild(th);
-
-      let cardHtml='';
-
-      /* PKT summary */
-      if(kinds.PKT?.length){
-        const p=kinds.PKT.at(-1);
-        if(p.ts===contState.pktTs) contState.pktCount++;
-        else { contState.pktTs=p.ts; contState.pktCount=0; }
-
-        if(contState.pktCount<3){
-          const hl=contState.pktCount>0?'background:yellow;':'';
-          cardHtml+=`<span style="${hl}">PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}</span>\n`;
+    /* ---------- fetch settings & start scheduler ---------- */
+    async function fetchSettings() {
+      try {
+        const resp = await fetch('/settings');
+        if (!resp.ok) return;
+        const settings = await resp.json();
+        if (settings.log_interval) {
+          const li = parseInt(settings.log_interval, 10);
+          if (!isNaN(li) && li > 0) {
+            interval = li;
+          }
         }
+      } catch (e) {
+        console.error('Could not fetch settings:', e);
+      }
+    }
+
+    function sched() {
+      clearTimeout(timer);
+      if (view === 'metrics') {
+        refresh();
+      } else if (view === 'mavlink') {
+        refreshMavlink();
+      }
+      timer = setTimeout(sched, interval);
+    }
+
+    // Initial load
+    (async () => {
+      await fetchSettings();
+      sched();
+    })();
+
+    /* ---------- MAIN METRICS REFRESH ---------- */
+    async function refresh() {
+      try {
+        if (ctrl) ctrl.abort();
+        ctrl = new AbortController();
+
+        const r = await fetch('/metrics', { signal: ctrl.signal });
+        if (!r.ok) return;
+        const data = await r.json();
+
+        let inB = 0, outB = 0;
+        Object.values(data).forEach(t => {
+          const p = t.PKT?.at(-1);
+          if (p) {
+            inB += p.count_b_all;
+            outB += p.count_p_outgoing;
+          }
+        });
+        bytesLine.textContent = `Total in ${(inB * 8e-6).toFixed(2)} Mbit/time | out ${(outB * 8e-6).toFixed(2)} Mbit/time`;
+
+        drawTab('rx', data, 'RX_ANT', s => s.rssi.avg);
+        drawTab('tx', data, 'TX_ANT', s => s.latency.avg);
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error(e);
+      }
+    }
+
+    /* ---------- TAB renderer ---------- */
+    function drawTab(tabId, data, antKey, ySel) {
+      const cont = document.getElementById(tabId);
+      if (!statsState[tabId]) statsState[tabId] = {};
+
+      /* --- STATS mode --- */
+      if (mode === 'stats') {
+        const frag = document.createDocumentFragment();
+        const tabState = statsState[tabId];
+
+        Object.entries(data).forEach(([container, kinds]) => {
+          if (!kinds[antKey]?.length) return;
+          if (!tabState[container]) tabState[container] = { pktTs: null, pktCount: 0, ants: {} };
+          const contState = tabState[container];
+
+          /* heading */
+          const th = document.createElement('div');
+          th.className = 'thread';
+          th.textContent = container;
+          frag.appendChild(th);
+
+          let cardHtml = '';
+
+          /* PKT summary */
+          if (kinds.PKT?.length) {
+            const p = kinds.PKT.at(-1);
+            if (p.ts === contState.pktTs) contState.pktCount++;
+            else { contState.pktTs = p.ts; contState.pktCount = 0; }
+
+            if (contState.pktCount < 3) {
+              const hl = contState.pktCount > 0 ? 'background:yellow;' : '';
+              cardHtml += `<span style="${hl}">PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}</span>\n`;
+            }
+          }
+
+          /* latest per-antenna */
+          const latestByAnt = {};
+          kinds[antKey].forEach(s => latestByAnt[s.antenna_id] = s);
+
+          Object.keys(latestByAnt).sort().forEach(antenna_id => {
+            const s = latestByAnt[antenna_id];
+            const antSt = contState.ants[antenna_id] || { ts: null, count: 0 };
+            if (s.ts === antSt.ts) antSt.count++;
+            else { antSt.ts = s.ts; antSt.count = 0; }
+            contState.ants[antenna_id] = antSt;
+            if (antSt.count >= 3) return;
+
+            const hl = antSt.count > 0 ? 'background:yellow;' : '';
+            if (s.latency) {
+              cardHtml += `<span style="${hl}">A: ${s.antenna_id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.avg} ms | lat_min=${s.latency.min} ms | lat_max=${s.latency.max} ms</span>\n`;
+            } else {
+              const dloss = (kinds.PKT?.at(-1)?.count_p_uniq || 0) - s.packet_count;
+              cardHtml += `<span style="${hl}">A: ${s.antenna_id} | BW=${s.bw} MHz | F=${s.freq} MHz | PC=${s.packet_count} | RA=${s.rssi.avg} dBm | SA=${s.snr.avg} dB | dloss=${dloss}</span>\n`;
+            }
+          });
+
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = cardHtml.trim();
+          frag.appendChild(card);
+        });
+
+        cont.replaceChildren(frag);
+        return;
       }
 
-      /* latest per-antenna */
-      const latestByAnt={};
-      kinds[antKey].forEach(s=>latestByAnt[s.antenna_id]=s);
+      /* --- GRAPHS mode --- */
+      cont.querySelectorAll('.thread,.card').forEach(el => el.remove());
 
-      Object.keys(latestByAnt).sort().forEach(antenna_id=>{
-        const s=latestByAnt[antenna_id];
-        const antSt=contState.ants[antenna_id]||{ts:null,count:0};
-        if(s.ts===antSt.ts) antSt.count++;
-        else { antSt.ts=s.ts; antSt.count=0; }
-        contState.ants[antenna_id]=antSt;
-        if(antSt.count>=3) return;                // skip spam
+      for (const [thr, kinds] of Object.entries(data)) {
+        if (!kinds[antKey]?.length) continue;
+        renderStrip(tabId, thr, 'ant', `${thr} – ANTENNA`, kinds[antKey], s => s.antenna_id,
+                    v => v.at(-1), ySel);
+        if (kinds.PKT?.length) {
+          renderStrip(tabId, thr, 'err', `${thr} – ERRORS`,
+                      [kinds.PKT.at(-1)], () => 1,
+                      p => ({ bad: p.count_p_bad, lost: p.count_p_lost, rec: p.count_p_fec_recovered, dec: p.count_p_dec_err }),
+                      null, { min: 0 }, ERR_KEYS);
+          renderStrip(tabId, thr, 'thr', `${thr} – THROUGHPUT`,
+                      [kinds.PKT.at(-1)], () => 1,
+                      p => ({ all: p.count_p_all, out: p.count_p_outgoing, uniq: p.count_p_uniq }),
+                      null, { min: 0 }, THR_KEYS);
+        }
+      }
+    }
 
-        const hl=antSt.count>0?'background:yellow;':'';
-        if(s.latency){
-          cardHtml+=`<span style="${hl}">A: ${s.antenna_id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.lat_avg} ms | lat_min=${s.latency.lat_min} ms | lat_max=${s.latency.lat_max} ms</span>\n`;
-        } else {
-          const dloss = (kinds.PKT?.at(-1)?.count_p_uniq||0) - s.packet_count;
-          cardHtml+=`<span style="${hl}">A: ${s.antenna_id} | BW=${s.bw} MHz | F=${s.freq} MHz | PC=${s.packet_count} | RA=${s.rssi.rssi_avg} dBm | SA=${s.snr.snr_avg} dB | dloss=${dloss}</span>\n`;
+    /* ---------- chart strip renderer ---------- */
+    function renderStrip(tab, thr, sfx, title, samples, keyFn, valFn, ySel, yExtra = {}, fixedOrder = null) {
+      const id = ckey(tab, thr, sfx);
+      let wrap = wrappers.get(id);
+
+      /* create wrapper & chart first time */
+      if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.className = 'chart';
+        wrap.innerHTML = `<div class="chart-title">${title}</div><canvas></canvas>`;
+        document.getElementById(tab).appendChild(wrap);
+        const ctx = wrap.querySelector('canvas');
+
+        charts.set(id, new Chart(ctx, {
+          type: 'line',
+          data: { labels: [...Array(MAX).keys()], datasets: [] },
+          options: {
+            animation: false,
+            responsive: true,
+            maintainAspectRatio: false,
+            spanGaps: true,
+            elements: { point: { radius: 0 } },
+            scales: {
+              x: { type: 'linear', min: 0, max: MAX - 1, ticks: { display: false } },
+              y: { beginAtZero: true, ticks: { precision: 0, callback: v => v }, ...yExtra }
+            },
+            plugins: { legend: { display: true, position: 'bottom' } }
+          }
+        }));
+        wrappers.set(id, wrap);
+      }
+
+      const chart = charts.get(id);
+      const used = new Set();
+
+      if (sfx === 'ant') {
+        const groups = {};
+        samples.forEach(s => (groups[keyFn(s)] ??= []).push(ySel(s)));
+
+        Object.keys(groups).sort().forEach((lab, idx) => {
+          let ds = chart.data.datasets.find(d => d.label === lab);
+          if (!ds) {
+            ds = { label: lab, borderColor: colour(idx), backgroundColor: colour(idx), tension: 0, fill: false, data: Array(MAX).fill(null) };
+            chart.data.datasets.push(ds);
+          }
+          ds.data.push(valFn(groups[lab]));
+          if (ds.data.length > MAX) ds.data.shift();
+          used.add(ds);
+        });
+      } else {
+        const obj = valFn(samples.at(-1));
+        (fixedOrder || Object.keys(obj).sort()).forEach((lab, idx) => {
+          let ds = chart.data.datasets.find(d => d.label === lab);
+          if (!ds) {
+            ds = { label: lab, borderColor: colour(idx), backgroundColor: colour(idx), tension: 0, fill: false, data: Array(MAX).fill(null) };
+            chart.data.datasets.push(ds);
+          }
+          ds.data.push(obj[lab]);
+          if (ds.data.length > MAX) ds.data.shift();
+          used.add(ds);
+        });
+      }
+
+      /* remove datasets that disappeared */
+      chart.data.datasets = chart.data.datasets.filter(d => used.has(d));
+      markDirty(chart);
+    }
+
+    /* ---------- chart flush batching ---------- */
+    const dirtyCharts = new Set();
+    let chartFlushScheduled = false;
+
+    function markDirty(chart) {
+      dirtyCharts.add(chart);
+      if (!chartFlushScheduled) {
+        chartFlushScheduled = true;
+        requestAnimationFrame(() => {
+          dirtyCharts.forEach(c => c.update('none'));
+          dirtyCharts.clear();
+          chartFlushScheduled = false;
+        });
+      }
+    }
+
+    /* ---------- COMMANDS section (unchanged except minor tidy) ---------- */
+    async function loadCmd() {
+      const sec = document.getElementById('commands');
+      sec.innerHTML = '<p>Loading…</p>';
+      try {
+        const cmds = await (await fetch('/commands')).json();
+        const groups = { settings: [], gs: [], vtx: [], other: [] };
+        cmds.forEach(cmd => {
+          if (cmd.startsWith('settings_')) groups.settings.push(cmd);
+          else if (cmd.startsWith('gs_'))  groups.gs.push(cmd);
+          else if (cmd.startsWith('vtx_')) groups.vtx.push(cmd);
+          else groups.other.push(cmd);
+        });
+        function makeBlock(title, list) {
+          if (!list.length) return '';
+          const btns = list.map(c => `<button class="cmd-btn" data-cmd="${c}">${c}</button>`).join('');
+          return `<div class="card collapsible collapsed">
+                    <div class="collapsible-title">${title}</div>
+                    <div class="collapsible-body">${btns}</div>
+                  </div>`;
+        }
+        sec.innerHTML =
+          makeBlock('Settings',     groups.settings) +
+          makeBlock('Groundstation',groups.gs) +
+          makeBlock('VTX',          groups.vtx) +
+          makeBlock('Other',        groups.other) +
+          '<div id="cmd-out"></div>';
+
+        sec.querySelectorAll('.cmd-btn').forEach(b => b.onclick = exec);
+        sec.querySelectorAll('.collapsible-title').forEach(t =>
+          t.onclick = () => t.parentElement.classList.toggle('collapsed'));
+      } catch (e) {
+        sec.innerHTML = `<p style="color:red">ERROR ${e}</p>`;
+      }
+    }
+
+    async function exec(e) {
+      const b = e.target, cmd = b.dataset.cmd;
+      b.disabled = true;
+      const out = document.getElementById('cmd-out');
+      out.textContent = '…';
+      try {
+        const j = await (await fetch('/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd })
+        })).json();
+        out.textContent = j.output;
+      } catch (err) {
+        out.textContent = 'ERROR ' + err;
+      }
+      b.disabled = false;
+    }
+
+    /* ---------- MAVLINK section ---------- */
+    function initMavlink() {
+      // Create bar chart for 16 channels
+      const ctx = document.getElementById('channelsBarChart').getContext('2d');
+      channelsBarChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: Array.from({ length: 16 }, (_, i) => `Ch ${i + 1}`),
+          datasets: [{
+            label: 'PWM value',
+            data: Array(16).fill(null),
+            backgroundColor: '#1976d2'
+          }]
+        },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { ticks: { autoSkip: false } },
+            y: { min: 1000, max: 2000, ticks: { stepSize: 100 } }
+          },
+          plugins: { legend: { display: false } }
         }
       });
-
-      const card=document.createElement('div');
-      card.className='card';
-      card.style.whiteSpace='pre-wrap';
-      card.style.fontFamily='monospace';
-      card.innerHTML = cardHtml.trim();
-      frag.appendChild(card);
-    });
-
-    cont.replaceChildren(frag);
-    return;
-  }
-
-  /* --- GRAPHS mode --- */
-  cont.querySelectorAll('.thread,.card').forEach(el=>el.remove());
-
-  for(const[thr,kinds] of Object.entries(data)){
-    if(!kinds[antKey]?.length) continue;
-    renderStrip(tabId, thr, 'ant', `${thr} – ANTENNA`, kinds[antKey], s=>s.antenna_id,
-                v=>v.at(-1), ySel);
-    if(kinds.PKT?.length){
-      renderStrip(tabId, thr, 'err', `${thr} – ERRORS`,
-                  [kinds.PKT.at(-1)], ()=>1,
-                  p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),
-                  null,{min:0}, ERR_KEYS);
-      renderStrip(tabId, thr, 'thr', `${thr} – THROUGHPUT`,
-                  [kinds.PKT.at(-1)], ()=>1,
-                  p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),
-                  null,{min:0}, THR_KEYS);
+      mavInitialized = true;
     }
-  }
-}
 
-/* ---------- chart strip renderer ---------- */
-function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
-  const id=ckey(tab,thr,sfx);
-  let wrap=wrappers.get(id);
+    async function refreshMavlink() {
+      try {
+        if (ctrl) ctrl.abort();
+        ctrl = new AbortController();
 
-  /* create wrapper & chart first time */
-  if(!wrap){
-    wrap=document.createElement('div');
-    wrap.className='chart';
-    wrap.innerHTML=`<div class="chart-title">${title}</div><canvas></canvas>`;
-    document.getElementById(tab).appendChild(wrap);
-    const ctx=wrap.querySelector('canvas');
+        const r = await fetch('/metrics', { signal: ctrl.signal });
+        if (!r.ok) return;
+        const data = await r.json();
 
-    charts.set(id,new Chart(ctx,{
-      type:'line',
-      data:{labels:[...Array(MAX).keys()],datasets:[]},
-      options:{
-        animation:false,
-        responsive:true,
-        maintainAspectRatio:false,
-        spanGaps:true,
-        elements:{point:{radius:0}},
-        scales:{
-          x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}},
-          y:{beginAtZero:true,ticks:{precision:0,callback:v=>v},...yExtra}
-        },
-        plugins:{legend:{display:true,position:'bottom'}}
+        // Pick the first thread that has RC_CHANNELS_OVERRIDE
+        let latestChannels = null;
+        let latestRadio = {};
+        let latestExec = {};
+        for (const [thr, kinds] of Object.entries(data)) {
+          if (kinds.RC_CHANNELS_OVERRIDE?.length) {
+            const rec = kinds.RC_CHANNELS_OVERRIDE.at(-1);
+            latestChannels = rec.channels;
+          }
+          if (kinds.RADIO_STATUS?.length) {
+            const rec = kinds.RADIO_STATUS.at(-1);
+            latestRadio[thr] = { quality: rec.quality, stats: rec.stats };
+          }
+          if (kinds.MAVLINK_EXEC?.length) {
+            const rec = kinds.MAVLINK_EXEC.at(-1);
+            latestExec[thr] = rec.values;
+          }
+        }
+
+        // Update bar chart
+        if (latestChannels && channelsBarChart) {
+          // Ensure we have exactly 16 values
+          const vals = latestChannels.slice(0, 16).concat(Array(16).fill(null)).slice(0, 16);
+          channelsBarChart.data.datasets[0].data = vals;
+          channelsBarChart.update();
+        }
+
+        // Update RADIO_STATUS box
+        const radioBox = document.getElementById('radioStatusBox');
+        if (Object.keys(latestRadio).length) {
+          let html = '';
+          Object.entries(latestRadio).forEach(([thr, rec]) => {
+            html += `${thr} → quality=${rec.quality} | stats=${rec.stats.join(':')}\n`;
+          });
+          radioBox.textContent = html.trim();
+        } else {
+          radioBox.textContent = 'No RADIO_STATUS data';
+        }
+
+        // Update MAVLINK_EXEC box
+        const execBox = document.getElementById('execBox');
+        if (Object.keys(latestExec).length) {
+          let html = '';
+          Object.entries(latestExec).forEach(([thr, vals]) => {
+            html += `${thr} → exec=${vals.join(':')}\n`;
+          });
+          execBox.textContent = html.trim();
+        } else {
+          execBox.textContent = 'No MAVLINK_EXEC data';
+        }
+
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error(e);
       }
-    }));
-    wrappers.set(id,wrap);
-  }
-
-  const chart = charts.get(id);
-
-  /* ---- mutate existing datasets instead of replacing (quick win) ---- */
-  const used = new Set();                       // track which labels we saw this tick
-
-  if(sfx==='ant'){
-    const groups={};
-    samples.forEach(s => (groups[keyFn(s)] ??= []).push(ySel(s)));
-
-    Object.keys(groups).sort().forEach((lab,idx)=>{
-      let ds = chart.data.datasets.find(d=>d.label===lab);
-      if(!ds){
-        ds = {label:lab,borderColor:colour(idx),backgroundColor:colour(idx),
-              tension:0,fill:false,data:Array(MAX).fill(null)};
-        chart.data.datasets.push(ds);
-      }
-      ds.data.push(valFn(groups[lab]));
-      if(ds.data.length>MAX) ds.data.shift();
-      used.add(ds);
-    });
-  }else{
-    const obj = valFn(samples.at(-1));
-    (fixedOrder||Object.keys(obj).sort()).forEach((lab,idx)=>{
-      let ds = chart.data.datasets.find(d=>d.label===lab);
-      if(!ds){
-        ds = {label:lab,borderColor:colour(idx),backgroundColor:colour(idx),
-              tension:0,fill:false,data:Array(MAX).fill(null)};
-        chart.data.datasets.push(ds);
-      }
-      ds.data.push(obj[lab]);
-      if(ds.data.length>MAX) ds.data.shift();
-      used.add(ds);
-    });
-  }
-
-  /* remove datasets that disappeared */
-  chart.data.datasets = chart.data.datasets.filter(d => used.has(d));
-
-  markDirty(chart);                              // medium tweak: batch redraws
-}
-
-/* ---------- COMMANDS section (unchanged except minor tidy) ---------- */
-async function loadCmd(){
-  const sec=document.getElementById('commands');
-  sec.innerHTML='<p>Loading…</p>';
-  try{
-    const cmds = await (await fetch('/commands')).json();
-    const groups = { settings: [], gs: [], vtx: [], other: [] };
-    cmds.forEach(cmd=>{
-      if(cmd.startsWith('settings_')) groups.settings.push(cmd);
-      else if(cmd.startsWith('gs_'))  groups.gs.push(cmd);
-      else if(cmd.startsWith('vtx_')) groups.vtx.push(cmd);
-      else groups.other.push(cmd);
-    });
-    function makeBlock(title,list){
-      if(!list.length) return '';
-      const btns=list.map(c=>`<button class="cmd-btn" data-cmd="${c}">${c}</button>`).join('');
-      return `<div class="card collapsible collapsed">
-                <div class="collapsible-title">${title}</div>
-                <div class="collapsible-body">${btns}</div>
-              </div>`;
     }
-    sec.innerHTML =
-      makeBlock('Settings',     groups.settings)+
-      makeBlock('Groundstation',groups.gs)+
-      makeBlock('VTX',          groups.vtx)+
-      makeBlock('Other',        groups.other)+
-      '<div id="cmd-out"></div>';
-
-    sec.querySelectorAll('.cmd-btn').forEach(b => b.onclick = exec);
-    sec.querySelectorAll('.collapsible-title').forEach(t =>
-      t.onclick = () => t.parentElement.classList.toggle('collapsed'));
-  }catch(e){
-    sec.innerHTML = `<p style="color:red">ERROR ${e}</p>`;
-  }
-}
-
-async function exec(e){
-  const b=e.target,cmd=b.dataset.cmd;
-  b.disabled=true;
-  const out=document.getElementById('cmd-out');
-  out.textContent='…';
-  try{
-    const j=await(await fetch('/exec',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({cmd})
-    })).json();
-    out.textContent=j.output;
-  }catch(err){
-    out.textContent='ERROR '+err;
-  }
-  b.disabled=false;
-}
-</script>
+  </script>
 </body>
 </html>
