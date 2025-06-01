@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-MAVLink Sniffer (v0.4)
+MAVLink Sniffer (v0.7)
 ======================
 
-* Aggregates message counts in user-set windows (default 1 s).
-* Prints RC channel 1-16 data separately.
-* `--raw` dumps every decoded message.
-* `--robust` engages the parser’s robust mode if available.
-* Minimal trigger framework for future “if-this-then-that”.
-* **Monkey-patch** included to accept MAVLink-2 frames whose
-  incompat-flags byte sets any of the still-reserved bits 4–7.
-  (These frames were rejected by pymavlink ≤ 2.4.x.)
+* Aggregates message counts in N-second windows (default 1 s).
+* Special read-out for RC_CHANNELS **and** RC_CHANNELS_OVERRIDE (ch 1-16).
+* --raw dumps every decoded packet.
+* --robust keeps parsing after framing/CRC errors.
+* Trigger framework stub for future automation.
+* Serial link opened with 460 800 baud, 8-N-1, no flow control.
 
-Tested with pymavlink 2.4.8 → 2.4.47 and the current 3.x-dev branch.
+Tested with pymavlink 2.4.8 → 2.4.47 and 3.x-dev.
 """
 
 from __future__ import annotations
@@ -23,45 +21,22 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 # ----------------------------------------------------------------------
-# Import pymavlink and monkey-patch the parser
+# Import pymavlink
 # ----------------------------------------------------------------------
 try:
     from pymavlink import mavutil
-except ModuleNotFoundError as exc:
+except ModuleNotFoundError:
     sys.stderr.write("Missing dependency – install with:  pip install pymavlink pyserial\n")
-    raise SystemExit(1) from exc
+    sys.exit(1)
 
-# ------------ Monkey-patch begins here ----------------------------------------
-# Older pymavlink rejects any MAVLink-2 frame whose incompat-flags byte
-# has bits other than bit-0 (signing).  New autopilot builds set bits
-# 4-7 for timestamp/encryption experiments, so we mask that error.
-_orig_parse_char = mavutil.mavlink.MAVLink.parse_char
-
-def _patched_parse_char(self, c):
-    """
-    Wrapper around MAVLink.parse_char that silently drops frames flagged
-    only for *invalid incompat_flags*.  All other MAVErrors still raise.
-    """
-    try:
-        return _orig_parse_char(self, c)
-    except mavutil.mavlink.MAVError as e:
-        if "invalid incompat_flags" in str(e):
-            # Ignore the offending frame, stay in sync, return None
-            return None
-        raise
-
-mavutil.mavlink.MAVLink.parse_char = _patched_parse_char
-# ------------ Monkey-patch ends here ------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Trigger skeleton (future expansion)
 # ---------------------------------------------------------------------------
 class Trigger:
-    """Call *action* when *predicate* on *msg* returns True."""
-
     def __init__(
         self,
         msg_type: str,
@@ -81,11 +56,11 @@ class Trigger:
 # Sniffer core
 # ---------------------------------------------------------------------------
 class MavlinkSniffer:
-    """MAVLink sniffer with aggregation, raw dump & triggers."""
+    CHANNEL_MSGS = ("RC_CHANNELS", "RC_CHANNELS_OVERRIDE")
 
     def __init__(
         self,
-        port: str = "/dev/ttyS3",
+        port: str = "/dev/ttyUSB0",
         baud: int = 460_800,
         period: float = 1.0,
         raw: bool = False,
@@ -94,19 +69,31 @@ class MavlinkSniffer:
         sign_key: bytes | None = None,
         link_id: int = 0,
     ) -> None:
-        # ----------- open serial connection --------------------------------
-        conn_kwargs = dict(baud=baud, dialect=dialect, autoreconnect=True)
-        # *robust_parsing* arrived in pymavlink 2.4.15
-        if robust and "robust_parsing" in inspect.signature(mavutil.mavlink_connection).parameters:
+        # ----------- open serial connection ------------------------------
+        conn_kwargs = dict(
+            baud=baud,
+            dialect=dialect,
+            autoreconnect=True,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            xonxoff=False,
+            rtscts=False,
+            dsrdtr=False,
+        )
+        if robust and "robust_parsing" in inspect.signature(
+            mavutil.mavlink_connection
+        ).parameters:
             conn_kwargs["robust_parsing"] = True
+
         self.master = mavutil.mavlink_connection(port, **conn_kwargs)
 
-        # ---- detect whether recv_match supports exception_on_bad_data ------
+        # ----------- detect recv_match options ---------------------------
         self._recv_supports_exc = "exception_on_bad_data" in inspect.signature(
             self.master.recv_match
         ).parameters
 
-        # ---- signing verification (RX-only) --------------------------------
+        # ----------- signing verification (RX-only) ----------------------
         if sign_key:
             if len(sign_key) != 32:
                 raise ValueError("Signing key must be 32 bytes (64-hex chars)")
@@ -115,7 +102,7 @@ class MavlinkSniffer:
             self.master.mav.signing.sign_outgoing = False
             print(f"Signing key installed (link-id {link_id}).")
 
-        # ---- bookkeeping ---------------------------------------------------
+        # ----------- bookkeeping -----------------------------------------
         self.period = period
         self.raw = raw
         self.triggers: List[Trigger] = []
@@ -156,33 +143,39 @@ class MavlinkSniffer:
             return self.master.recv_match(
                 blocking=False, timeout=0.02, exception_on_bad_data=False
             )
-        # older pymavlink
         return self.master.recv_match(blocking=False, timeout=0.02)
 
     def _reset_counters(self) -> None:
         self.msg_counts: Dict[str, int] = defaultdict(int)
-        self.rc_count = 0
-        self.rc_latest: list[int | None] = [None] * 16
+        self.rc_info: Dict[str, Dict[str, Any]] = {
+            m: {"count": 0, "latest": [None] * 16} for m in self.CHANNEL_MSGS
+        }
 
     def _record(self, msg: Any) -> None:
         t = msg.get_type()
-        if t == "RC_CHANNELS":
-            self.rc_count += 1
+        if t in self.CHANNEL_MSGS:
+            info = self.rc_info[t]
+            info["count"] += 1
+            latest = info["latest"]
             for i in range(16):
                 field = f"chan{i + 1}_raw"
                 if hasattr(msg, field):
-                    self.rc_latest[i] = getattr(msg, field)
+                    latest[i] = getattr(msg, field)
         else:
             self.msg_counts[t] += 1
 
     def _report(self) -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"\n[{ts}] Aggregation window {self.period:.1f}s")
-        if self.rc_count:
-            print(f"RC_CHANNELS: {self.rc_count} msgs")
-            for ch, val in enumerate(self.rc_latest, 1):
-                if val is not None:
-                    print(f"  CH{ch:>2}: {val}")
+        # --- special channel messages
+        for mtype in self.CHANNEL_MSGS:
+            info = self.rc_info[mtype]
+            if info["count"]:
+                print(f"{mtype}: {info['count']} msgs")
+                for ch, val in enumerate(info["latest"], 1):
+                    if val is not None:
+                        print(f"  CH{ch:>2}: {val}")
+        # --- generic counts
         for mtype in sorted(self.msg_counts):
             print(f"{mtype}: {self.msg_counts[mtype]}")
         print("-" * 60)
@@ -199,11 +192,11 @@ class MavlinkSniffer:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Simple MAVLink sniffer with aggregation and raw dump.")
     p.add_argument("--port", default="/dev/ttyUSB0", help="Serial port (default: /dev/ttyUSB0)")
-    p.add_argument("--baud", default=420000, type=int, help="Baud rate (default: 420000)")
+    p.add_argument("--baud", default=460800, type=int, help="Baud rate (default: 460800)")
     p.add_argument("--period", default=1.0, type=float, help="Aggregation period in seconds (default: 1)")
     p.add_argument("--raw", action="store_true", help="Dump every decoded message – bypass aggregation/triggers")
     p.add_argument("--dialect", default="common", help="MAVLink dialect (default: common)")
-    p.add_argument("--robust", action="store_true", help="Enable robust parser (silences BAD_DATA spam if supported)")
+    p.add_argument("--robust", action="store_true", help="Enable robust parser (silences most BAD_DATA spam)")
 
     key_grp = p.add_mutually_exclusive_group()
     key_grp.add_argument("--sign-key", help="32-byte signing key as hex string (MAVLink 2 signing)")
@@ -216,8 +209,7 @@ def _load_key(args: argparse.Namespace) -> bytes | None:
     if args.sign_key:
         return bytes.fromhex(args.sign_key.strip())
     if args.sign_key_file:
-        content = args.sign_key_file.read_text().strip()
-        return bytes.fromhex(content)
+        return bytes.fromhex(args.sign_key_file.read_text().strip())
     return None
 
 
