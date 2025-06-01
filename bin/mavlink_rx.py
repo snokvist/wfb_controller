@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-MAVLink Sniffer (v0.8)
-======================
-
-* Aggregates in *period_ms* windows (default 1000 ms).
-* Logs three lines per window:
-    ts MAVLINK_STATS   period_ms:total_cnt:unique_cnt
-    ts RC_CHANNELS_OVERRIDE cnt  tgt_sys tgt_comp ch1:…:ch16
-    ts RADIO_STATUS         cnt  rssi:remrssi:txbuf:noise:remnoise:rxerr:fixed
-* --raw dumps every decoded packet (no aggregation).
-* --robust keeps parsing after framing/CRC errors.
-* Serial opened 460 800 baud, 8-N-1, no flow control.
+MAVLink Sniffer (v0.9.1)
+========================
+* Aggregation period in **milliseconds**.
+* Logs MAVLINK_STATS / RC_CHANNELS_OVERRIDE / RADIO_STATUS.
+* MAVLINK_STATS now includes bytes-received + CRC-error counts and works
+  even when `MAVLink.total_crc_fail` is missing.
+* Flushes stdout after every report.
 """
 
 from __future__ import annotations
@@ -20,7 +16,6 @@ import inspect
 import sys
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, Dict, List
 
 try:
@@ -43,6 +38,7 @@ class MavlinkSniffer:
         dialect: str = "common",
         robust: bool = False,
     ) -> None:
+
         conn_kwargs = dict(
             baud=baud,
             dialect=dialect,
@@ -64,6 +60,9 @@ class MavlinkSniffer:
             self.master.recv_match
         ).parameters
 
+        # Some pymavlink builds lack total_crc_fail – detect once
+        self._has_crc_fail = hasattr(self.master.mav, "total_crc_fail")
+
         self.period_ms = period_ms
         self.period_sec = period_ms / 1000.0
         self.raw = raw
@@ -73,7 +72,7 @@ class MavlinkSniffer:
         self._reset_counters()
 
     # ------------------------------------------------------------------
-    # Run loop
+    # Main loop
     # ------------------------------------------------------------------
     def run(self) -> None:
         print(
@@ -100,24 +99,35 @@ class MavlinkSniffer:
     # Helpers
     # ------------------------------------------------------------------
     def _recv_once(self):
-        if self._recv_supports_exc:
-            return self.master.recv_match(
-                blocking=False, timeout=0.02, exception_on_bad_data=False
-            )
-        return self.master.recv_match(blocking=False, timeout=0.02)
+        try:
+            if self._recv_supports_exc:
+                return self.master.recv_match(
+                    blocking=False, timeout=0.02, exception_on_bad_data=False
+                )
+            return self.master.recv_match(blocking=False, timeout=0.02)
+        except mavutil.mavlink.MAVError:
+            self.crc_errors += 1
+            return None
 
     def _reset_counters(self) -> None:
         self.total_cnt = 0
+        self.bytes_rx = 0
+        self.crc_errors = 0
+
+        if self._has_crc_fail:
+            self.start_crc_fail = self.master.mav.total_crc_fail
+
         self.msg_counts: Dict[str, int] = defaultdict(int)
 
         self.rc_cnt = 0
-        self.rc_latest = None  # last RC_CHANNELS_OVERRIDE message
+        self.rc_latest = None
 
         self.radio_cnt = 0
-        self.radio_latest = None  # last RADIO_STATUS message
+        self.radio_latest = None
 
     def _record(self, msg: Any) -> None:
         self.total_cnt += 1
+        self.bytes_rx += len(msg.get_msgbuf())
         mtype = msg.get_type()
 
         if mtype == self.CHANNEL_MSG:
@@ -137,46 +147,51 @@ class MavlinkSniffer:
 
     def _report(self) -> None:
         ts = self._now_ms()
-        unique_cnt = len(self.msg_counts)
-        if self.rc_cnt:
-            unique_cnt += 1
-        if self.radio_cnt:
-            unique_cnt += 1
+        unique_cnt = len(self.msg_counts) + (1 if self.rc_cnt else 0) + (
+            1 if self.radio_cnt else 0
+        )
+
+        crc_delta = self.crc_errors
+        if self._has_crc_fail:
+            crc_delta += self.master.mav.total_crc_fail - self.start_crc_fail
 
         # MAVLINK_STATS
-        print(f"{ts} MAVLINK_STATS {self.period_ms}:{self.total_cnt}:{unique_cnt}")
+        print(
+            f"{ts} MAVLINK_STATS "
+            f"{self.period_ms}:{self.total_cnt}:{unique_cnt}:{self.bytes_rx}:{crc_delta}"
+        )
 
         # RC_CHANNELS_OVERRIDE
         if self.rc_cnt and self.rc_latest:
-            msg = self.rc_latest
-            chans = [getattr(msg, f"chan{i}_raw", 0) for i in range(1, 17)]
-            chan_str = ":".join(str(v) for v in chans)
+            m = self.rc_latest
+            chan_str = ":".join(str(getattr(m, f'chan{i}_raw', 0)) for i in range(1, 17))
             print(
                 f"{ts} {self.CHANNEL_MSG} {self.rc_cnt} "
-                f"{msg.target_system} {msg.target_component} {chan_str}"
+                f"{m.target_system} {m.target_component} {chan_str}"
             )
 
         # RADIO_STATUS
         if self.radio_cnt and self.radio_latest:
             r = self.radio_latest
-            radio_str = f"{r.rssi}:{r.remrssi}:{r.txbuf}:{r.noise}:{r.remnoise}:{r.rxerrors}:{r.fixed}"
+            radio_str = (
+                f"{r.rssi}:{r.remrssi}:{r.txbuf}:{r.noise}:"
+                f"{r.remnoise}:{r.rxerrors}:{r.fixed}"
+            )
             print(f"{ts} {self.RADIO_MSG} {self.radio_cnt} {radio_str}")
 
-        # you could add more summary lines here (bytes, errors, …)
+        sys.stdout.flush()  # ensure immediate delivery
 
 
 # ---------------------------------------------------------------------------
-# CLI glue
+# CLI
 # ---------------------------------------------------------------------------
 def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Lightweight MAVLink sniffer.")
     p.add_argument("--port", default="/dev/ttyUSB0", help="Serial port (default /dev/ttyUSB0)")
     p.add_argument("--baud", default=460800, type=int, help="Baud rate (default 460800)")
-    p.add_argument(
-        "--period", default=1000, type=int, help="Aggregation period in **milliseconds** (default 1000)"
-    )
-    p.add_argument("--raw", action="store_true", help="Dump every decoded message (no aggregation)")
-    p.add_argument("--dialect", default="common", help="MAVLink dialect (default common)")
+    p.add_argument("--period", default=1000, type=int, help="Aggregation period in ms (default 1000)")
+    p.add_argument("--raw", action="store_true", help="Dump every decoded packet")
+    p.add_argument("--dialect", default="common", help="MAVLink dialect")
     p.add_argument("--robust", action="store_true", help="Enable robust parser")
     return p.parse_args(argv)
 
