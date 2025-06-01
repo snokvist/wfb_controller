@@ -6,7 +6,7 @@ MAVLink sniffer with RC-triggered commands
 v1.2 – merges the v1.1 feature set with the “Patch A” perf tweaks:
 
 * ``use_native=True``  ➜ C/Cython parser if your pymavlink build provides it.
-* 1 ms nap whenever the receive queue is empty (keeps CPU below 20 % on a
+* 10 ms nap whenever the receive queue is empty (keeps CPU below 20 % on a
   Radxa-Zero3 at 460 kbaud).
 * Everything else (MAVLINK_STATS, command execution, channel filters,
   pause/persist logic, etc.) unchanged.
