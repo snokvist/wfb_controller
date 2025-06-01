@@ -114,7 +114,6 @@
       modeBtn.textContent = (mode === 'stats') ? 'GRAPHS' : 'STATS';
 
       if (mode === 'graphs') {
-        // Clear old charts
         wrappers.forEach(wrap => wrap.remove());
         wrappers.clear(); charts.clear();
       }
@@ -122,19 +121,13 @@
     };
 
     mavBtn.onclick = () => {
-      if (view !== 'mavlink') {
-        switchTo('mavlink');
-      } else {
-        switchTo('metrics');
-      }
+      if (view !== 'mavlink') switchTo('mavlink');
+      else switchTo('metrics');
     };
 
     document.getElementById('cmdToggle').onclick = () => {
-      if (view !== 'commands') {
-        switchTo('commands');
-      } else {
-        switchTo('metrics');
-      }
+      if (view !== 'commands') switchTo('commands');
+      else switchTo('metrics');
     };
 
     document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
@@ -143,27 +136,22 @@
     });
 
     function switchTo(target) {
-      // Hide all three sections
       document.getElementById('metrics').style.display = 'none';
       document.getElementById('commands').style.display = 'none';
       document.getElementById('mavlink').style.display  = 'none';
-
-      // Show target
       document.getElementById(target).style.display = '';
       view = target;
 
-      // If entering MAVLINK, init if needed and refresh
       if (target === 'mavlink') {
         if (!mavInitialized) initMavlink();
         refreshMavlink();
       }
-      // If entering metrics, refresh metrics if needed
       if (target === 'metrics') {
         refresh();
       }
     }
 
-    /* ---------- fetch settings & start scheduler ---------- */
+    /* ---------- fetch settings ---------- */
     async function fetchSettings() {
       try {
         const resp = await fetch('/settings');
@@ -180,6 +168,7 @@
       }
     }
 
+    /* ---------- scheduler ---------- */
     function sched() {
       clearTimeout(timer);
       if (view === 'metrics') {
@@ -199,6 +188,9 @@
     /* ---------- MAIN METRICS REFRESH ---------- */
     async function refresh() {
       try {
+        // Always re-fetch settings to update interval
+        await fetchSettings();
+
         if (ctrl) ctrl.abort();
         ctrl = new AbortController();
 
@@ -211,7 +203,7 @@
           const p = t.PKT?.at(-1);
           if (p) {
             inB += p.count_b_all;
-            outB += p.count_p_outgoing;
+            outB += p.count_b_outgoing;
           }
         });
         bytesLine.textContent = `Total in ${(inB * 8e-6).toFixed(2)} Mbit/time | out ${(outB * 8e-6).toFixed(2)} Mbit/time`;
@@ -477,6 +469,9 @@
 
     async function refreshMavlink() {
       try {
+        // Re-fetch settings to keep interval updated if user switches back to metrics later
+        await fetchSettings();
+
         if (ctrl) ctrl.abort();
         ctrl = new AbortController();
 
@@ -505,7 +500,6 @@
 
         // Update bar chart
         if (latestChannels && channelsBarChart) {
-          // Ensure we have exactly 16 values
           const vals = latestChannels.slice(0, 16).concat(Array(16).fill(null)).slice(0, 16);
           channelsBarChart.data.datasets[0].data = vals;
           channelsBarChart.update();
