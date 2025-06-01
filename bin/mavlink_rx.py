@@ -17,6 +17,10 @@ import argparse
 import inspect
 import subprocess
 import sys
+import signal
+
+# Exit silently if the stdout pipe closes (e.g. downstream `grep` quits)
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 import time
 from collections import defaultdict
 from pathlib import Path
