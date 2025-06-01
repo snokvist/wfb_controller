@@ -85,8 +85,8 @@ class MavlinkSniffer:
 
     def __init__(
         self,
-        port: str = "/dev/ttyUSB0",
-        baud: int = 420_000,
+        port: str = "/dev/ttyS3",
+        baud: int = 460_800,
         period: float = 1.0,
         raw: bool = False,
         dialect: str = "common",
