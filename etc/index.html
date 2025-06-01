@@ -35,7 +35,7 @@
     .collapsible-title::after{content:' [\2013]';float:right}
     /* MAVLINK section styles */
     #mavlink .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
-    #mavlink .status-box, #mavlink .exec-box{background:var(--card);border-radius:6px;box-shadow:0 1px 3px #0002;padding:.5rem .7rem;margin:.5rem 0;font-family:monospace;font-size:.8rem;white-space:pre-wrap}
+    #mavlink .status-box,#mavlink .exec-box{background:var(--card);border-radius:6px;box-shadow:0 1px 3px #0002;padding:.5rem .7rem;margin:.5rem 0;font-family:monospace;font-size:.8rem;white-space:pre-wrap}
   </style>
 
   <!-- Global Chart.js tweaks -->
@@ -141,6 +141,11 @@
       document.getElementById('mavlink').style.display  = 'none';
       document.getElementById(target).style.display = '';
       view = target;
+
+      if (target === 'commands') {
+        const sec = document.getElementById('commands');
+        if (!sec.hasChildNodes()) loadCmd();
+      }
 
       if (target === 'mavlink') {
         if (!mavInitialized) initMavlink();
@@ -385,7 +390,7 @@
       }
     }
 
-    /* ---------- COMMANDS section (unchanged except minor tidy) ---------- */
+    /* ---------- COMMANDS section ---------- */
     async function loadCmd() {
       const sec = document.getElementById('commands');
       sec.innerHTML = '<p>Loading…</p>';
