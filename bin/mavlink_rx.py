@@ -50,7 +50,7 @@ class MavlinkSniffer:
     CHANNEL_MSG = "RC_CHANNELS_OVERRIDE"
     RADIO_MSG = "RADIO_STATUS"
     SCRIPT = Path("/usr/bin/channels.sh")
-    _POLL_SLEEP = 0.001  # 1 ms pause when no message was decoded
+    _POLL_SLEEP = 0.01  # 10 ms pause when no message was decoded
 
     # .....................................................................
     def __init__(
