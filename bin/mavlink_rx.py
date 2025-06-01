@@ -66,6 +66,8 @@ class MavlinkSniffer:
     ) -> None:
         # ------------- open serial (robust_parsing only when supported)
         conn_kwargs = dict(baud=baud, dialect=dialect, autoreconnect=True)
+        if "use_native" in inspect.signature(mavutil.mavlink_connection).parameters:
+            conn_kwargs["use_native"] = True          # <── NEW LINE
         if robust and "robust_parsing" in inspect.signature(mavutil.mavlink_connection).parameters:
             conn_kwargs["robust_parsing"] = True
 
