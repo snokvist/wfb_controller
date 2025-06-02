@@ -3,21 +3,27 @@
 MAVLink sniffer with RC-triggered commands
 =========================================
 
-v1.2 – merges the v1.1 feature set with the “Patch A” perf tweaks:
+v1.3 – adds **peek / gap sampling** (periodic “listen-windows”) while keeping every
+other feature intact.
 
-* ``use_native=True``  ➜ C/Cython parser if your pymavlink build provides it.
-* 10 ms nap whenever the receive queue is empty (keeps CPU below 20 % on a
-  Radxa-Zero3 at 460 kbaud).
-* Everything else (MAVLINK_STATS, command execution, channel filters,
-  pause/persist logic, etc.) unchanged.
+* ``--peek-window`` N   → process incoming bytes for *N ms* each cycle
+* ``--peek-gap``   M   → discard / sleep for *M ms* between windows  
+  (default: same as *peek-window*).  
+  Set ``--peek-window 0`` (default) to restore the original continuous mode.
 
-Usage
------
+The rest of the v1.2 perf tweaks are still here:
 
-::  
+* ``use_native=True`` when available.
+* 10 ms nap when the RX queue is empty.
+
+Typical usage
+-------------
+
+::
 
    mavlink_rx.py --port /dev/ttyS3 --baud 460800 \
        --period 1000 --robust \
+       --peek-window 50 --peek-gap 50 \
        --command-parse --channels 5,6 --min-change 100 \
        --persist 500 --pause 500
 """
@@ -26,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import inspect
-import queue
 import signal
 import subprocess
 import sys
@@ -45,6 +50,7 @@ except ModuleNotFoundError:
 # Honour SIGPIPE (otherwise BrokenPipeError spam when downstream consumer quits)
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
+
 # ---------------------------------------------------------------------------
 class MavlinkSniffer:
     CHANNEL_MSG = "RC_CHANNELS_OVERRIDE"
@@ -53,7 +59,7 @@ class MavlinkSniffer:
     _POLL_SLEEP = 0.01  # 10 ms pause when no message was decoded
 
     # .....................................................................
-    def __init__(
+    def __init__(  # pylint: disable=too-many-locals,too-many-arguments
         self,
         *,
         port: str = "/dev/ttyUSB0",
@@ -68,6 +74,9 @@ class MavlinkSniffer:
         persist_ms: int = 500,
         pause_ms: int = 500,
         channels_filter: Optional[set[int]] = None,
+        # peek / gap sampling
+        peek_window_ms: int = 0,
+        peek_gap_ms: Optional[int] = None,
     ) -> None:
 
         # ---------- open serial (native/C parser & robust only if supported)
@@ -108,6 +117,12 @@ class MavlinkSniffer:
         self.pause_ms = pause_ms
         self.allowed_channels = channels_filter  # None ⇒ all
 
+        # ---------- peek / gap configuration
+        self.peek_window_ms = max(0, int(peek_window_ms))
+        self.peek_gap_ms = (
+            int(peek_gap_ms) if peek_gap_ms is not None else self.peek_window_ms
+        )
+
         # ---------- runtime state
         self.raw = raw
         self.total_bytes = 0
@@ -122,14 +137,26 @@ class MavlinkSniffer:
 
         print(
             f"Listening on {self.master.port} @{self.master.baud}  "
-            f"| agg={self.period_ms} ms  raw={self.raw}  robust={robust}",
+            f"| agg={self.period_ms} ms  raw={self.raw}  robust={robust}  "
+            f"peek={self.peek_window_ms}/{self.peek_gap_ms} ms",
             flush=True,
         )
 
     # ----------------------------------------------------------------------
-    # main loop
+    # public entry point
     # ----------------------------------------------------------------------
     def run(self) -> None:
+        if self.peek_window_ms <= 0:
+            # old continuous mode
+            self._run_continuous()
+        else:
+            # new peek / gap mode
+            self._run_peek()
+
+    # ----------------------------------------------------------------------
+    # continuous (legacy) loop
+    # ----------------------------------------------------------------------
+    def _run_continuous(self) -> None:
         try:
             while True:
                 msg = self._recv_once()
@@ -140,11 +167,7 @@ class MavlinkSniffer:
                         self._record(msg)
 
                 # periodic report
-                now = time.time()
-                if not self.raw and now >= self._next_report_ts:
-                    self._report()
-                    self._reset_counters()
-                    self._next_report_ts += self.period_sec
+                self._maybe_report()
 
                 # nothing decoded → tiny nap to spare the CPU
                 if not msg:
@@ -152,9 +175,41 @@ class MavlinkSniffer:
         except KeyboardInterrupt:
             pass  # graceful exit – SIGPIPE already handled
 
-    # ------------------------------------------------------------------
-    # Serial receive
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # peek / gap loop
+    # ----------------------------------------------------------------------
+    def _run_peek(self) -> None:
+        w_sec = self.peek_window_ms / 1000.0
+        gap_sec = self.peek_gap_ms / 1000.0
+        try:
+            while True:
+                # -- gap / discard phase --------------------------------------
+                self._purge_serial_buffer()
+                if gap_sec > 0:
+                    time.sleep(gap_sec)
+
+                # -- active peek window ---------------------------------------
+                t0 = time.monotonic()
+                while (time.monotonic() - t0) < w_sec:
+                    msg = self._recv_once()
+                    if msg:
+                        if self.raw:
+                            print(msg, flush=True)
+                        else:
+                            self._record(msg)
+
+                    # periodic report (same logic as continuous)
+                    self._maybe_report()
+
+                    # spare CPU when idle during window
+                    if not msg:
+                        time.sleep(self._POLL_SLEEP)
+        except KeyboardInterrupt:
+            pass
+
+    # ----------------------------------------------------------------------
+    # helper: read one MAVLink frame (non-blocking)
+    # ----------------------------------------------------------------------
     def _recv_once(self):
         try:
             if self._recv_supports_exc:
@@ -165,6 +220,33 @@ class MavlinkSniffer:
         except mavutil.mavlink.MAVError:
             self.parse_errors += 1
             return None
+
+    # ----------------------------------------------------------------------
+    # helper: periodic report & counter reset
+    # ----------------------------------------------------------------------
+    def _maybe_report(self) -> None:
+        if self.raw:
+            return
+        now = time.time()
+        if now >= self._next_report_ts:
+            self._report()
+            self._reset_counters()
+            self._next_report_ts += self.period_sec
+
+    # ----------------------------------------------------------------------
+    # helper: purge driver / OS receive FIFO quickly
+    # ----------------------------------------------------------------------
+    def _purge_serial_buffer(self) -> None:
+        try:
+            port = getattr(self.master, "port", None)
+            if port is None:
+                return
+            if hasattr(port, "reset_input_buffer"):
+                port.reset_input_buffer()  # pyserial ≥ 3.0
+            elif hasattr(port, "flushInput"):
+                port.flushInput()  # older pyserial
+        except Exception:  # pylint: disable=broad-except
+            pass  # never fatal – just best-effort
 
     # ------------------------------------------------------------------
     # Counters & state
@@ -338,6 +420,23 @@ def _parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dialect", default="common", help="MAVLink dialect")
     p.add_argument("--robust", action="store_true", help="Enable robust parser")
 
+    # peek / gap sampling
+    p.add_argument(
+        "--peek-window",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Listen / decode for this many ms each cycle (0 = continuous)",
+    )
+    p.add_argument(
+        "--peek-gap",
+        type=int,
+        default=None,
+        metavar="MS",
+        help="Discard / sleep for this many ms between windows "
+        "(default: same as --peek-window)",
+    )
+
     # command-execution flags
     p.add_argument("--command-parse", action="store_true", help="Enable RC ➜ command execution")
     p.add_argument("--min-change", type=int, default=100, help="Min Δ to trigger (default 100)")
@@ -377,6 +476,8 @@ def main(argv: List[str] | None = None) -> None:
         persist_ms=args.persist,
         pause_ms=args.pause,
         channels_filter=_parse_channel_filter(args.channels),
+        peek_window_ms=args.peek_window,
+        peek_gap_ms=args.peek_gap,
     )
     sniffer.run()
 
