@@ -13,7 +13,7 @@ WHITELIST=(service0 service1)
 
 declare -A CHANNEL=(
   [service0]=104
-  [servuce1]=149
+  [service1]=149
 )
 ##################################
 
