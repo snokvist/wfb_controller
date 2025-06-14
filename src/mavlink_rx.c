@@ -1,4 +1,4 @@
-/*  mavlink_rx.c  —  MAVLink 1/2 sniffer with RC-triggered commands
+/*  mavlink_rx.c  —  MAVLink sniffer + RC-triggered commands
     Build: gcc -O2 -Wall -Wextra -std=c11 -o mavlink_rx mavlink_rx.c
 */
 
@@ -20,16 +20,17 @@
 #include <time.h>
 #include <unistd.h>
 
+/* ----------------------------------------------------------------- const */
 #define DEF_DEV  "/dev/ttyUSB0"
 #define DEF_BAUD 460800
-#define DEF_PER  1000          /* stats period ms */
+#define DEF_PER  1000                       /* stats period ms */
 
 #define STX_V1 0xFEu
 #define STX_V2 0xFDu
 
 #define ID_RC_OVERRIDE   70u
 #define ID_RADIO_STATUS 109u
-#define LEN_RC_MIN      34u
+#define LEN_RC_MIN      34u                 /* 16 channels + sys/comp */
 #define LEN_RAD_MIN      8u
 #define MAX_PAY        255u
 
@@ -68,11 +69,11 @@ static bool parse_byte(uint8_t b, frame_t *out)
         else if (b == STX_V2) { memset(&cur, 0, sizeof cur); cur.ver = 2; st = V2_LEN; }
         break;
     /* -- MAVLink-1 -- */
-    case V1_LEN:  cur.len = b; idx = 0; st = V1_SEQ;  break;
-    case V1_SEQ:                 st = V1_SYS;  break;
-    case V1_SYS:  cur.sysid  = b; st = V1_COMP; break;
-    case V1_COMP: cur.compid = b; st = V1_ID;   break;
-    case V1_ID:   cur.msgid  = b; st = cur.len ? V1_PAY : V1_C1; break;
+    case V1_LEN:  cur.len = b; idx = 0;        st = V1_SEQ;  break;
+    case V1_SEQ:                              st = V1_SYS;  break;
+    case V1_SYS:  cur.sysid  = b;             st = V1_COMP; break;
+    case V1_COMP: cur.compid = b;             st = V1_ID;   break;
+    case V1_ID:   cur.msgid  = b;             st = cur.len ? V1_PAY : V1_C1; break;
     case V1_PAY:
         if (idx < (int)MAX_PAY) cur.pay[idx] = b;
         if (++idx == (int)cur.len) st = V1_C1;
@@ -80,13 +81,13 @@ static bool parse_byte(uint8_t b, frame_t *out)
     case V1_C1: st = V1_C2; break;
     case V1_C2: *out = cur; st = IDLE; return true;
     /* -- MAVLink-2 -- */
-    case V2_LEN:  cur.len = b;            st = V2_INCF;  break;
-    case V2_INCF: incf = b;               st = V2_COMPF; break;
-    case V2_COMPF:                        st = V2_SEQ;   break;
-    case V2_SEQ:                          st = V2_SYS;   break;
-    case V2_SYS:  cur.sysid  = b;         st = V2_COMP;  break;
-    case V2_COMP: cur.compid = b;         st = V2_ID0;   break;
-    case V2_ID0:  cur.msgid  = b;         st = V2_ID1;   break;
+    case V2_LEN:  cur.len = b;               st = V2_INCF; break;
+    case V2_INCF: incf = b;                  st = V2_COMPF;break;
+    case V2_COMPF:                            st = V2_SEQ; break;
+    case V2_SEQ:                              st = V2_SYS; break;
+    case V2_SYS:  cur.sysid  = b;            st = V2_COMP; break;
+    case V2_COMP: cur.compid = b;            st = V2_ID0;  break;
+    case V2_ID0:  cur.msgid  = b;            st = V2_ID1;  break;
     case V2_ID1:  cur.msgid |= (uint32_t)b << 8;  st = V2_ID2; break;
     case V2_ID2:  cur.msgid |= (uint32_t)b << 16; idx = 0;
                   st = cur.len ? V2_PAY : V2_C1;  break;
@@ -222,7 +223,7 @@ int main(int argc, char **argv)
             if (!parse_byte(buf[i], &f)) continue;
             st.frames++;
 
-            /* raw preview */
+            /* raw preview ------------------------------------------------ */
             if (cfg.raw) {
                 printf("RAW v=%u id=%" PRIu32 " len=%u |", f.ver, f.msgid, f.len);
                 uint8_t show = f.len > 32 ? 32 : f.len;
@@ -231,9 +232,15 @@ int main(int argc, char **argv)
                 printf("\n");
             }
 
-            /* RC override */
+            /* RC override ------------------------------------------------ */
             if (f.msgid == ID_RC_OVERRIDE && f.len >= LEN_RC_MIN) {
-                st.rc_cnt++; /* system/component are at end of payload in v2 */
+                st.rc_cnt++;
+
+                /* channels are first; sys/comp are last two bytes */
+                int sys_ofs = f.len - 2;
+                st.rc_sys  = f.pay[sys_ofs];
+                st.rc_comp = f.pay[sys_ofs + 1];
+
                 const uint16_t *vals = (const uint16_t *)f.pay;
                 for (int cix = 0; cix < 16; ++cix) st.rc[cix] = vals[cix];
 
@@ -253,11 +260,13 @@ int main(int argc, char **argv)
                                     uint64_t t0 = ms_now();
                                     run_script(cix + 1, val);
                                     int rt = (int)(ms_now() - t0);
+
                                     st.execs[st.exec_cnt].ch     = cix + 1;
                                     st.execs[st.exec_cnt].old_v  = s->old_val;
                                     st.execs[st.exec_cnt].new_v  = val;
                                     st.execs[st.exec_cnt].rt     = rt;
                                     st.exec_cnt++;
+
                                     next_ok_exec = now + cfg.pause_ms;
                                     s->last = val;
                                 }
@@ -271,11 +280,12 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            /* Radio status */
+            /* Radio status ----------------------------------------------- */
             else if (f.msgid == ID_RADIO_STATUS && f.len >= LEN_RAD_MIN) {
                 st.radio_cnt++;
                 const uint8_t *p = f.pay;
-                st.rssi = p[4]; st.remrssi = p[5]; st.txbuf = p[6]; st.noise = p[7];
+                st.rssi = p[4]; st.remrssi = p[5];
+                st.txbuf = p[6]; st.noise = p[7];
             }
         }
 
@@ -286,8 +296,8 @@ int main(int argc, char **argv)
                    (st.rc_cnt ? 1 : 0) + (st.radio_cnt ? 1 : 0), st.bytes);
 
             if (st.rc_cnt) {
-                printf("%" PRIu64 " RC_CHANNELS_OVERRIDE %u ",
-                       now, st.rc_cnt);
+                printf("%" PRIu64 " RC_CHANNELS_OVERRIDE %u %u %u ",
+                       now, st.rc_cnt, st.rc_sys, st.rc_comp);
                 for (int i = 0; i < 16; ++i)
                     printf("%u%c", st.rc[i], i == 15 ? '\n' : ':');
             }
@@ -303,6 +313,7 @@ int main(int argc, char **argv)
                        st.execs[i].new_v, st.execs[i].rt);
             }
 
+            fflush(stdout);                      /* immediate flush */
             stat_reset(&st); st.next_ms += cfg.period;
         }
     }
