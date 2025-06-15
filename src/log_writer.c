@@ -6,11 +6,10 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <signal.h>
-#include <fcntl.h>
 
 #define SOCK_PATH "/tmp/log_input.sock"
 
-int connect_with_retry(const char *path) {
+int connect_with_retry(const char *path, const char *tag) {
     int sockfd;
     struct sockaddr_un addr = {0};
 
@@ -25,33 +24,19 @@ int connect_with_retry(const char *path) {
             continue;
         }
 
-        if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0)
+        if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            if (send(sockfd, tag, strlen(tag), 0) < 0) {
+                perror("send tag");
+                close(sockfd);
+                sleep(3);
+                continue;
+            }
             return sockfd;
+        }
 
         perror("connect");
         close(sockfd);
         sleep(3);
-    }
-}
-
-int send_with_retry(int *sockfd, const char *tag, const char *line) {
-    while (1) {
-        ssize_t sent = send(*sockfd, line, strlen(line), 0);
-        if (sent >= 0) return 0;
-
-        perror("send");
-        close(*sockfd);
-        fprintf(stderr, "[INFO] Reconnecting...\n");
-        *sockfd = connect_with_retry(SOCK_PATH);
-
-        // Re-send the tag after reconnect
-        if (send(*sockfd, tag, strlen(tag), 0) < 0) {
-            perror("send tag after reconnect");
-            continue;
-        }
-
-        // Resend the line after reconnect
-        // (loop will retry if this fails again)
     }
 }
 
@@ -64,28 +49,26 @@ int main(int argc, char *argv[]) {
     char tag[128];
     snprintf(tag, sizeof(tag), "%s", argv[1]);
 
-    // Connect and send initial tag
-    int sockfd = connect_with_retry(SOCK_PATH);
-    if (send(sockfd, tag, strlen(tag), 0) < 0) {
-        perror("send tag");
-        close(sockfd);
-        return 1;
-    }
+    int sockfd = connect_with_retry(SOCK_PATH, tag);
 
-    // Read from stdin and send line-by-line
     char input[1024];
     while (fgets(input, sizeof(input), stdin)) {
         char line[1200];
         size_t len = strlen(input);
 
-        // Strip trailing newline
+        // Strip newline
         if (len > 0 && input[len - 1] == '\n')
             input[len - 1] = '\0';
 
         snprintf(line, sizeof(line), "%s:%s\n", tag, input);
 
-        if (send_with_retry(&sockfd, tag, line) != 0) {
-            fprintf(stderr, "[ERROR] Failed to send line, dropping.\n");
+        ssize_t sent = send(sockfd, line, strlen(line), 0);
+        if (sent < 0) {
+            perror("send");
+            close(sockfd);
+            fprintf(stderr, "[INFO] Dropped line and reconnecting...\n");
+            sockfd = connect_with_retry(SOCK_PATH, tag);
+            // Do not resend the dropped line
         }
     }
 
