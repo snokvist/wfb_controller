@@ -1,23 +1,69 @@
 #!/usr/bin/env python3
 """
-Thread-Manager Live Monitor (v5.2 “fast-full”)
+Thread-Manager Live Monitor (v5.3 “ini-commands”)
 
-•  Fast single-dispatch parser (≈ 5 × fewer regex calls)
-•  Per-thread batching → 1 lock every 10 records or 50 ms
-•  Smaller history BUFFER (100)
-•  Tight /metrics JSON (json.dumps + compact separators)
-
-All functional fields from v5 remain intact, so the current
-frontend keeps working (rssi.avg, snr.avg, pkt counters, MAVLINK
-extras, …).
+Changes vs v5.2
+────────────────
+•  Loads `[commands]` from /etc/commands.ini once at startup
+   – `/commands` → list of keys  
+   – `/exec`     → run mapped shell line, returns
+     `{"stdout":…, "stderr":…, "code":…}` (404 if unknown)
+•  New `/wifi_channel` endpoint  
+   – Replies with `channel=…;width=…;region=…\n`
+•  Removed external “settings” code + endpoint
+•  Existing metrics/stream logic untouched
 """
 
-import argparse, socket, threading, time, re, pathlib, json
+import argparse, socket, threading, time, re, pathlib, json, subprocess, configparser
 from collections import defaultdict, deque
 from typing import Dict, Deque, Any, List, Optional
 from flask import Flask, Response, request, abort, send_file
 
-# ───────── regex helpers ─────────
+# ───────── load /etc/commands.ini ─────────
+COMMANDS_INI = "/etc/commands.ini"
+_ini = configparser.ConfigParser(interpolation=None)
+_ini.read(COMMANDS_INI)
+COMMANDS_MAP: Dict[str, str] = (
+    dict(_ini.items("commands")) if _ini.has_section("commands") else {}
+)
+
+def run_command(key: str) -> Dict[str, Any]:
+    """Run the shell line mapped to *key* via /bin/sh -c and return stdout/stderr/code."""
+    cmd_line = COMMANDS_MAP[key]
+    proc = subprocess.run(
+        ["/bin/sh", "-c", cmd_line],
+        capture_output=True, text=True
+    )
+    return {"stdout": proc.stdout, "stderr": proc.stderr, "code": proc.returncode}
+
+# ───────── wifi-channel helper ─────────
+INTERFACE  = "service2"
+FREQ_BASE  = 5000          # MHz
+
+def current_channel_blob() -> str:
+    """Return `channel=…;width=…;region=…\\n` (raises on failure)."""
+    iw  = subprocess.check_output(["iw", "dev"]).decode()
+    reg = subprocess.check_output(["iw", "reg", "get"]).decode()
+
+    m = re.search(
+        rf"Interface {re.escape(INTERFACE)}.*?channel (\d+).*?width:\s*(\d+).*?center1:\s*(\d+)",
+        iw, re.S
+    )
+    if not m:
+        raise RuntimeError(f"interface {INTERFACE!r} not found in `iw dev` output")
+    chan, width_raw, center1 = map(int, m.groups())
+    freq = FREQ_BASE + 5 * chan
+
+    width = {20:"HT20",80:"80MHz",160:"160MHz",10:"10MHz",5:"5MHz"}.get(
+        width_raw,
+        "HT40+" if width_raw == 40 and center1 > freq else
+        "HT40-" if width_raw == 40 else "HT20"
+    )
+
+    region = re.search(r"country\s+([A-Z]{2}):", reg).group(1)
+    return f"channel={chan};width={width};region={region}\n"
+
+# ───────── regex helpers (unchanged) ─────────
 _RX_ANT_RE = re.compile(
     r"^(?P<freq>\d+):(?P<mcs>\d+):(?P<bw>\d+)\s+"
     r"(?P<ant>[0-9a-fA-F]+)\s+"
@@ -198,31 +244,11 @@ class StreamClient(threading.Thread):
             self._since_flush = 0
             self._last_flush_t = now
 
-# ───── helper RPCs ─────
-def tm_request(host: str, port: int, cmd: str) -> str:
-    try:
-        with socket.create_connection((host, port), 5) as s:
-            s.sendall((cmd + "\n").encode())
-            return s.recv(4096).decode(errors="ignore").strip()
-    except Exception as e:
-        return f"ERROR: {e}"
-
-def list_commands(host, port):
-    return [l for l in tm_request(host, port, "list commands").splitlines() if l]
-
-def list_settings(host: str, port: int) -> Dict[str, str]:
-    out = tm_request(host, port, "list settings")
-    res = {}
-    for ln in out.splitlines():
-        if ln.strip() and not ln.startswith('#') and ':' in ln:
-            k, v = ln.split(':', 1)
-            res[k.strip()] = v.strip()
-    return res
-
 # ───────── flask app ─────────
 def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
     app = Flask(__name__, static_folder=None)
 
+    # ── metrics ──
     @app.route("/metrics")
     def metrics() -> Response:
         with _metrics_lock:
@@ -230,26 +256,34 @@ def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
         return Response(json.dumps(data, separators=(",", ":")),
                         mimetype="application/json")
 
+    # ── commands list ──
     @app.route("/commands")
     def commands_api() -> Response:
-        return Response(json.dumps(list_commands(host, port), separators=(",", ":")),
+        return Response(json.dumps(list(COMMANDS_MAP.keys()), separators=(",", ":")),
                         mimetype="application/json")
 
-    @app.route("/settings")
-    def settings_api() -> Response:
-        return Response(json.dumps(list_settings(host, port), separators=(",", ":")),
-                        mimetype="application/json")
-
+    # ── command exec ──
     @app.route("/exec", methods=["POST"])
     def exec_api() -> Response:
-        cmd = request.json.get("cmd")
-        if not cmd:
-            abort(400)
-        out = tm_request(host, port, f"exec {cmd}")
-        return Response(json.dumps({"output": out}, separators=(",", ":")),
+        key = request.json.get("cmd") if request.is_json else None
+        if not key:
+            abort(400, description="missing 'cmd'")
+        if key not in COMMANDS_MAP:
+            abort(404, description=f"unknown command {key!r}")
+        res = run_command(key)
+        return Response(json.dumps(res, separators=(",", ":")),
                         mimetype="application/json")
 
-    # UI
+    # ── wifi channel ──
+    @app.route("/wifi_channel")
+    def wifi_channel_api() -> Response:
+        try:
+            blob = current_channel_blob()
+        except Exception as exc:
+            abort(500, description=str(exc))
+        return Response(blob, mimetype="text/plain")
+
+    # ── UI (same logic as before) ──
     if ui_path:
         ui_path = ui_path.expanduser().resolve()
         if not ui_path.is_file():
