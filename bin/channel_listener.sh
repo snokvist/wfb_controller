@@ -17,13 +17,18 @@ trap cleanup EXIT
 
 mkfifo "$SOCKET"
 
+# Read initial channel
 CUR_CHAN=$(iw dev "$IFACE" info | awk '/channel/ {print $2}' | head -n1)
 [ -n "$CUR_CHAN" ] || CUR_CHAN="unknown"
 
-while true; do
-    socat -u UDP-RECV:$PORT STDOUT
-done > "$SOCKET" 2>/dev/null &
+# ✅ Start persistent background UDP listener to the FIFO
+(
+    while true; do
+        socat -u UDP-RECV:$PORT STDOUT
+    done
+) > "$SOCKET" 2>/dev/null &
 
+# ✅ Function to validate width string
 is_valid_width() {
     case "$1" in
         HT20|HT40+|HT40-|NOHT|5MHz|10MHz|80MHz|160MHz) return 0 ;;
@@ -31,6 +36,7 @@ is_valid_width() {
     esac
 }
 
+# ✅ Main message loop
 while true; do
     LAST_LINE=""
     while read -t 1 LINE < "$SOCKET"; do
@@ -39,7 +45,7 @@ while true; do
 
     if [ -n "$LAST_LINE" ]; then
         CHAN=$(echo "$LAST_LINE" | sed -n 's/.*channel=\([0-9]*\).*/\1/p')
-        WIDTH=$(echo "$LAST_LINE" | sed -n 's/.*width=\([A-Za-z0-9+]*\).*/\1/p')
+        WIDTH=$(echo "$LAST_LINE" | sed -n 's/.*width=\([A-Za-z0-9+-]*\).*/\1/p')
         REGION=$(echo "$LAST_LINE" | sed -n 's/.*region=\([A-Z]*\).*/\1/p')
 
         if ! is_valid_width "$WIDTH"; then
