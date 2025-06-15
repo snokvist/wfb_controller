@@ -1,7 +1,7 @@
 #!/bin/sh
 
 IFACE="$1"
-MASTER_URL="http://192.168.2.20:8000/channel.txt"
+MASTER_URL="http://192.168.2.20:5010/wifi_channel"
 
 if [ -z "$IFACE" ]; then
     echo "Usage: $0 <interface>"
