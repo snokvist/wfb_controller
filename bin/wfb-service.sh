@@ -89,6 +89,7 @@ for ifc in "${WHITELIST[@]}"; do
     iw dev "$ifc" set monitor otherbss
     ip link set "$ifc" up
     iw dev "$ifc" set channel "${CHANNEL[$ifc]:-149}" "$BANDWIDTH"
+    channel_listener.sh "$ifc" &
 
     initialised_ifaces+=("$ifc")
   else
