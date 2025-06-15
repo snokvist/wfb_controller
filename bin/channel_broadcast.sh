@@ -13,20 +13,20 @@ while true; do
             exit
         }')
 
-    # Example LINE:
-    # channel 104 (5520 MHz), width: 40 MHz, center1: 5530 MHz
-
     CHAN=$(echo "$LINE" | awk '{print $2}')
     WIDTH_RAW=$(echo "$LINE" | sed -n 's/.*width: \([0-9]*\) MHz.*/\1/p')
     CENTER1=$(echo "$LINE" | sed -n 's/.*center1: \([0-9]*\) MHz.*/\1/p')
 
-    # Normalize width
+    # Compute primary channel frequency
+    FREQ=$((5000 + 5 * CHAN))
+
+    # Detect width
     case "$WIDTH_RAW" in
         20)
             WIDTH="HT20"
             ;;
         40)
-            if [ -n "$CENTER1" ] && [ "$CENTER1" -gt "$CHAN" ]; then
+            if [ "$CENTER1" -gt "$FREQ" ]; then
                 WIDTH="HT40+"
             else
                 WIDTH="HT40-"
