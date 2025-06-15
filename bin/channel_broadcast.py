@@ -1,83 +1,55 @@
 #!/usr/bin/env python3
-import http.server
-import socketserver
-import subprocess
-import time
+import http.server, socketserver, subprocess, re
 
 PORT = 8000
 INTERFACE = "service2"
 FREQ_BASE = 5000
 
-class ChannelHandler(http.server.BaseHTTPRequestHandler):
+def current_channel_blob() -> bytes:
+    """Return the `channel=…;width=…;region=…\n` line as bytes."""
+    iw   = subprocess.check_output(["iw", "dev"]).decode()
+    reg  = subprocess.check_output(["iw", "reg", "get"]).decode()
+
+    # --- parse iw dev ---
+    m = re.search(rf"Interface {INTERFACE}.*?channel (\d+).*?width:\s*(\d+).*?center1:\s*(\d+)",
+                  iw, re.S)
+    if not m:
+        raise RuntimeError("interface not found")
+    chan, width_raw, center1 = map(int, m.groups())
+    freq = FREQ_BASE + 5 * chan
+
+    width = {20: "HT20", 80: "80MHz", 160: "160MHz", 10: "10MHz", 5: "5MHz"}.get(
+        width_raw,
+        "HT40+" if width_raw == 40 and center1 > freq else
+        "HT40-" if width_raw == 40 else
+        "HT20"
+    )
+
+    # --- parse reg domain ---
+    region = re.search(r"country\s+([A-Z]{2}):", reg).group(1)
+
+    return f"channel={chan};width={width};region={region}\n".encode()
+
+class ChannelHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/channel.txt":
-            self.send_error(404)
-            return
+        if self.path == "/channel.txt":
+            try:
+                blob = current_channel_blob()
+            except Exception as exc:
+                self.send_error(500, explain=str(exc))
+                return
 
-        try:
-            iw_output = subprocess.check_output(["iw", "dev"]).decode()
-            reg_output = subprocess.check_output(["iw", "reg", "get"]).decode()
-        except subprocess.CalledProcessError:
-            self.send_error(500)
-            return
-
-        # Extract block for interface
-        block = ""
-        found = False
-        for line in iw_output.splitlines():
-            if line.strip().startswith("Interface"):
-                found = INTERFACE in line
-            if found and "channel" in line:
-                block = line.strip()
-                break
-
-        # Parse fields
-        try:
-            parts = block.split(',')
-            chan_part = parts[0].split()
-            chan = int(chan_part[1])  # e.g. "channel 104"
-            width_raw = parts[1].split(':')[1].strip().split()[0]  # "40"
-            center1 = int(parts[2].split(':')[1].strip().split()[0])  # "5530"
-            freq = FREQ_BASE + 5 * chan
-        except Exception:
-            self.send_error(500)
-            return
-
-        # Determine width
-        if width_raw == "20":
-            width = "HT20"
-        elif width_raw == "40":
-            width = "HT40+" if center1 > freq else "HT40-"
-        elif width_raw == "80":
-            width = "80MHz"
-        elif width_raw == "160":
-            width = "160MHz"
-        elif width_raw == "10":
-            width = "10MHz"
-        elif width_raw == "5":
-            width = "5MHz"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
         else:
-            width = "HT20"
+            # Anything else is served off disk as usual
+            super().do_GET()
 
-        # Region
-        try:
-            region_line = next(l for l in reg_output.splitlines() if "country" in l)
-            region = region_line.split()[1].split(":")[0]
-        except Exception:
-            region = "US"
-
-        # Output response
-        response = f"channel={chan};width={width};region={region}\n"
-        print(f"[HTTP] Served: {response.strip()}")
-
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(response)))
-        self.end_headers()
-        self.wfile.write(response.encode())
-
-# Run server
 if __name__ == "__main__":
     with socketserver.TCPServer(("", PORT), ChannelHandler) as httpd:
-        print(f"[HTTP] Serving on port {PORT} — interface: {INTERFACE}")
+        print(f"Serving dynamic /channel.txt on :{PORT}")
         httpd.serve_forever()
+
