@@ -31,6 +31,7 @@ elif [ "$1" -ge 1980 ] && [ "$1" -le 2020 ]; then
 # === Set B: Offset -25 (±20) ===
 elif [ "$1" -ge 1055 ] && [ "$1" -le 1095 ]; then
     echo "Set B - 1075"
+    set_channel.sh service2 48 HT20
 
 elif [ "$1" -ge 1255 ] && [ "$1" -le 1295 ]; then
     echo "Set B - 1275"
