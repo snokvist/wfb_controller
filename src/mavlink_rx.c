@@ -192,16 +192,35 @@ static int run_script(int ch, int val)
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+/* ---------------------------------------------------------- serial helper */
+static int open_serial(const cfg_t *cfg)
+{
+    for (;;) {
+        int fd = open(cfg->dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
+        if (fd >= 0) {
+            struct termios t = {0};
+            if (tcgetattr(fd, &t) == 0) {
+                cfmakeraw(&t);
+                t.c_cflag |= CLOCAL | CREAD;
+                cfsetispeed(&t, B460800);
+                cfsetospeed(&t, B460800);
+                if (tcsetattr(fd, TCSANOW, &t) == 0)
+                    return fd;                         /* success */
+            }
+            close(fd);
+        }
+        perror("serial open/setup");
+        fprintf(stderr, "Retrying in 3 s …\n");
+        sleep(3);
+    }
+}
+
 /* ---------------------------------------------------------------- main */
 int main(int argc, char **argv)
 {
     cfg_t cfg; cfg_default(&cfg); parse_cli(argc, argv, &cfg);
 
-    int fd = open(cfg.dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) die("open");
-    struct termios t = {0}; tcgetattr(fd, &t); cfmakeraw(&t);
-    t.c_cflag |= CLOCAL | CREAD; cfsetispeed(&t, B460800); cfsetospeed(&t, B460800);
-    tcsetattr(fd, TCSANOW, &t);
+    int fd = open_serial(&cfg);                      /* blocks until success */
 
     printf("Listening on %s @%d raw=%s cmd=%s period=%u\n",
            cfg.dev, cfg.baud, cfg.raw ? "on" : "off",
@@ -214,9 +233,28 @@ int main(int argc, char **argv)
     ch_state_t ch[16] = {0};
     uint64_t next_ok_exec = 0;
 
-    while (1) {
-        if (poll(&pfd, 1, 50) <= 0) continue;
-        ssize_t n = read(fd, buf, sizeof buf); if (n <= 0) continue;
+    for (;;) {
+        int pr = poll(&pfd, 1, 50);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            pr = 0;                                  /* treat as failure */
+        }
+
+        if (pr == 0) goto periodic;                  /* timeout */
+
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n <= 0) {
+            if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+                perror("serial read");
+                fprintf(stderr, "Lost %s – attempting reconnect …\n", cfg.dev);
+                close(fd);
+                sleep(3);
+                fd        = open_serial(&cfg);       /* blocks again */
+                pfd.fd    = fd;
+            }
+            continue;
+        }
+
         st.bytes += (uint32_t)n;
 
         for (ssize_t i = 0; i < n; ++i) {
@@ -289,32 +327,35 @@ int main(int argc, char **argv)
             }
         }
 
-        uint64_t now = ms_now();
-        if (now >= st.next_ms) {
-            printf("%" PRIu64 " MAVLINK_STATS %u:%u:%u:%u:0\n",
-                   now, cfg.period, st.frames,
-                   (st.rc_cnt ? 1 : 0) + (st.radio_cnt ? 1 : 0), st.bytes);
+periodic:
+        {
+            uint64_t now = ms_now();
+            if (now >= st.next_ms) {
+                printf("%" PRIu64 " MAVLINK_STATS %u:%u:%u:%u:0\n",
+                       now, cfg.period, st.frames,
+                       (st.rc_cnt ? 1 : 0) + (st.radio_cnt ? 1 : 0), st.bytes);
 
-            if (st.rc_cnt) {
-                printf("%" PRIu64 " RC_CHANNELS_OVERRIDE %u %u %u ",
-                       now, st.rc_cnt, st.rc_sys, st.rc_comp);
-                for (int i = 0; i < 16; ++i)
-                    printf("%u%c", st.rc[i], i == 15 ? '\n' : ':');
-            }
-            if (st.radio_cnt) {
-                printf("%" PRIu64 " RADIO_STATUS %u %u:%u:%u:%u\n",
-                       now, st.radio_cnt,
-                       st.rssi, st.remrssi, st.txbuf, st.noise);
-            }
-            for (int i = 0; i < st.exec_cnt; ++i) {
-                printf("%" PRIu64 " MAVLINK_EXEC %d:%d:%d:%d:%d\n",
-                       now, i + 1,
-                       st.execs[i].ch, st.execs[i].old_v,
-                       st.execs[i].new_v, st.execs[i].rt);
-            }
+                if (st.rc_cnt) {
+                    printf("%" PRIu64 " RC_CHANNELS_OVERRIDE %u %u %u ",
+                           now, st.rc_cnt, st.rc_sys, st.rc_comp);
+                    for (int i = 0; i < 16; ++i)
+                        printf("%u%c", st.rc[i], i == 15 ? '\n' : ':');
+                }
+                if (st.radio_cnt) {
+                    printf("%" PRIu64 " RADIO_STATUS %u %u:%u:%u:%u\n",
+                           now, st.radio_cnt,
+                           st.rssi, st.remrssi, st.txbuf, st.noise);
+                }
+                for (int i = 0; i < st.exec_cnt; ++i) {
+                    printf("%" PRIu64 " MAVLINK_EXEC %d:%d:%d:%d:%d\n",
+                           now, i + 1,
+                           st.execs[i].ch, st.execs[i].old_v,
+                           st.execs[i].new_v, st.execs[i].rt);
+                }
 
-            fflush(stdout);                      /* immediate flush */
-            stat_reset(&st); st.next_ms += cfg.period;
+                fflush(stdout);                      /* immediate flush */
+                stat_reset(&st); st.next_ms += cfg.period;
+            }
         }
     }
 }
