@@ -1,34 +1,14 @@
 #!/bin/sh
 
 IFACE="$1"
-PORT=5005
+MASTER_URL="http://192.168.2.20:8000/channel.txt"
 
 if [ -z "$IFACE" ]; then
     echo "Usage: $0 <interface>"
     exit 1
 fi
 
-SOCKET="/tmp/channel_$IFACE.sock.$$"
-
-cleanup() {
-    [ -e "$SOCKET" ] && rm -f "$SOCKET"
-}
-trap cleanup EXIT
-
-mkfifo "$SOCKET"
-
-# Read initial channel
-CUR_CHAN=$(iw dev "$IFACE" info | awk '/channel/ {print $2}' | head -n1)
-[ -n "$CUR_CHAN" ] || CUR_CHAN="unknown"
-
-# ✅ Start persistent background UDP listener to the FIFO
-(
-    while true; do
-        socat -u UDP-RECV:$PORT STDOUT
-    done
-) > "$SOCKET" 2>/dev/null &
-
-# ✅ Function to validate width string
+# Validate width string
 is_valid_width() {
     case "$1" in
         HT20|HT40+|HT40-|NOHT|5MHz|10MHz|80MHz|160MHz) return 0 ;;
@@ -36,12 +16,13 @@ is_valid_width() {
     esac
 }
 
-# ✅ Main message loop
+# Read initial channel
+CUR_CHAN=$(iw dev "$IFACE" info 2>/dev/null | awk '/channel/ {print $2}' | head -n1)
+[ -n "$CUR_CHAN" ] || CUR_CHAN="unknown"
+
+# Main polling loop
 while true; do
-    LAST_LINE=""
-    while read -t 1 LINE < "$SOCKET"; do
-        LAST_LINE="$LINE"
-    done
+    LAST_LINE=$(wget -qO- "$MASTER_URL")
 
     if [ -n "$LAST_LINE" ]; then
         CHAN=$(echo "$LAST_LINE" | sed -n 's/.*channel=\([0-9]*\).*/\1/p')
@@ -50,6 +31,7 @@ while true; do
 
         if ! is_valid_width "$WIDTH"; then
             echo "[$IFACE] Skipping invalid width: $WIDTH"
+            sleep 1
             continue
         fi
 
