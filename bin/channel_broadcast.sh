@@ -1,60 +1,83 @@
-#!/bin/sh
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import subprocess
+import time
 
-INTERFACE="${1:-service2}"
-PORT=5005
-BCAST_ADDR="255.255.255.255"
-INTERVAL=1
+PORT = 8000
+INTERFACE = "service2"
+FREQ_BASE = 5000
 
-while true; do
-    LINE=$(iw dev | awk -v iface="$INTERFACE" '
-        $1 == "Interface" { in_block = ($2 == iface) }
-        in_block && $1 == "channel" {
-            print
-            exit
-        }')
+class ChannelHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/channel.txt":
+            self.send_error(404)
+            return
 
-    CHAN=$(echo "$LINE" | awk '{print $2}')
-    WIDTH_RAW=$(echo "$LINE" | sed -n 's/.*width: \([0-9]*\) MHz.*/\1/p')
-    CENTER1=$(echo "$LINE" | sed -n 's/.*center1: \([0-9]*\) MHz.*/\1/p')
+        try:
+            iw_output = subprocess.check_output(["iw", "dev"]).decode()
+            reg_output = subprocess.check_output(["iw", "reg", "get"]).decode()
+        except subprocess.CalledProcessError:
+            self.send_error(500)
+            return
 
-    # Compute primary channel frequency
-    FREQ=$((5000 + 5 * CHAN))
+        # Extract block for interface
+        block = ""
+        found = False
+        for line in iw_output.splitlines():
+            if line.strip().startswith("Interface"):
+                found = INTERFACE in line
+            if found and "channel" in line:
+                block = line.strip()
+                break
 
-    # Detect width
-    case "$WIDTH_RAW" in
-        20)
-            WIDTH="HT20"
-            ;;
-        40)
-            if [ "$CENTER1" -gt "$FREQ" ]; then
-                WIDTH="HT40+"
-            else
-                WIDTH="HT40-"
-            fi
-            ;;
-        80)
-            WIDTH="80MHz"
-            ;;
-        160)
-            WIDTH="160MHz"
-            ;;
-        10)
-            WIDTH="10MHz"
-            ;;
-        5)
-            WIDTH="5MHz"
-            ;;
-        *)
-            WIDTH="HT20"
-            ;;
-    esac
+        # Parse fields
+        try:
+            parts = block.split(',')
+            chan_part = parts[0].split()
+            chan = int(chan_part[1])  # e.g. "channel 104"
+            width_raw = parts[1].split(':')[1].strip().split()[0]  # "40"
+            center1 = int(parts[2].split(':')[1].strip().split()[0])  # "5530"
+            freq = FREQ_BASE + 5 * chan
+        except Exception:
+            self.send_error(500)
+            return
 
-    REGION=$(iw reg get | awk '/country/ {print $2}' | cut -d: -f1)
-    [ -n "$REGION" ] || REGION="US"
+        # Determine width
+        if width_raw == "20":
+            width = "HT20"
+        elif width_raw == "40":
+            width = "HT40+" if center1 > freq else "HT40-"
+        elif width_raw == "80":
+            width = "80MHz"
+        elif width_raw == "160":
+            width = "160MHz"
+        elif width_raw == "10":
+            width = "10MHz"
+        elif width_raw == "5":
+            width = "5MHz"
+        else:
+            width = "HT20"
 
-    MSG="channel=$CHAN;width=$WIDTH;region=$REGION"
-    echo "[MASTER] Broadcasting: $MSG"
-    (echo "$MSG" | nc -u -b "$BCAST_ADDR" "$PORT") &
+        # Region
+        try:
+            region_line = next(l for l in reg_output.splitlines() if "country" in l)
+            region = region_line.split()[1].split(":")[0]
+        except Exception:
+            region = "US"
 
-    sleep "$INTERVAL"
-done
+        # Output response
+        response = f"channel={chan};width={width};region={region}\n"
+        print(f"[HTTP] Served: {response.strip()}")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response.encode())
+
+# Run server
+if __name__ == "__main__":
+    with socketserver.TCPServer(("", PORT), ChannelHandler) as httpd:
+        print(f"[HTTP] Serving on port {PORT} — interface: {INTERFACE}")
+        httpd.serve_forever()
