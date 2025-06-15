@@ -6,25 +6,47 @@ BCAST_ADDR="255.255.255.255"
 INTERVAL=1
 
 while true; do
-    # Parse all from a single call
     LINE=$(iw dev | awk -v iface="$INTERFACE" '
-        $1 == "Interface" { found = ($2 == iface) }
-        found && /channel/ && ch == "" { ch = $2 }
-        found && /width:/ && width == "" { width = $2 }
-        END { if (ch && width) print ch, width }
-    ')
+        $1 == "Interface" { in_block = ($2 == iface) }
+        in_block && $1 == "channel" {
+            print
+            exit
+        }')
 
-    [ -n "$LINE" ] || continue
+    # Example LINE:
+    # channel 104 (5520 MHz), width: 40 MHz, center1: 5530 MHz
 
-    CHAN=$(echo "$LINE" | awk '{print $1}')
-    WIDTH=$(echo "$LINE" | awk '{print $2}')
+    CHAN=$(echo "$LINE" | awk '{print $2}')
+    WIDTH_RAW=$(echo "$LINE" | sed -n 's/.*width: \([0-9]*\) MHz.*/\1/p')
+    CENTER1=$(echo "$LINE" | sed -n 's/.*center1: \([0-9]*\) MHz.*/\1/p')
 
-    case "$WIDTH" in
-        20*) WIDTH="HT20" ;;
-        40*) WIDTH="HT40" ;;
-        80*) WIDTH="HT80" ;;
-        160*) WIDTH="HT160" ;;
-        *) WIDTH="HT20" ;;
+    # Normalize width
+    case "$WIDTH_RAW" in
+        20)
+            WIDTH="HT20"
+            ;;
+        40)
+            if [ -n "$CENTER1" ] && [ "$CENTER1" -gt "$CHAN" ]; then
+                WIDTH="HT40+"
+            else
+                WIDTH="HT40-"
+            fi
+            ;;
+        80)
+            WIDTH="80MHz"
+            ;;
+        160)
+            WIDTH="160MHz"
+            ;;
+        10)
+            WIDTH="10MHz"
+            ;;
+        5)
+            WIDTH="5MHz"
+            ;;
+        *)
+            WIDTH="HT20"
+            ;;
     esac
 
     REGION=$(iw reg get | awk '/country/ {print $2}' | cut -d: -f1)
@@ -32,8 +54,6 @@ while true; do
 
     MSG="channel=$CHAN;width=$WIDTH;region=$REGION"
     echo "[MASTER] Broadcasting: $MSG"
-
-    # This must be run in a subshell to avoid blocking
     (echo "$MSG" | nc -u -b "$BCAST_ADDR" "$PORT") &
 
     sleep "$INTERVAL"
