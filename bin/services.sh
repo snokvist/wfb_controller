@@ -8,8 +8,9 @@ trap _cleanup EXIT
 
 
 log_collector --quiet &
+sleep 1
 wfb-service.sh | log_writer wfb_service &
-sleep 2
+sleep 1
 webui.py --web-port 5010 --ui /usr/bin/index2.html --stream-cmd "wfb_rx,mavlink_rx" --host 127.0.0.1 2>&1| log_writer webui &
 mavlink_rx -d /dev/ttyS3 --command-parse --channels 5,8 --min-change 20 --period 1000 2>&1| log_writer mavlink_rx &
 wfb_rx -a 10000 -p 0 -U /run/wfb_video.sock -K /etc/openipc.key -R 2097152 -s 2097152 -l 100 -i 7669206 2>&1| log_writer wfb_rx &
