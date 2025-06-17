@@ -35,13 +35,13 @@
 #define ID_RC_OVERRIDE          70u
 #define ID_RADIO_STATUS        109u
 #define ID_GLOBAL_POSITION_INT  33u
-#define ID_GPS_STATUS           25u                         /* NEW */
+#define ID_GPS_STATUS           25u
 
-#define LEN_RC_MIN       34u          /* 16 channels + sys/comp */
+#define LEN_RC_MIN       34u           /* 16 channels + sys/comp */
 #define LEN_RAD_MIN       8u
-#define LEN_GPI_MIN      28u          /* GLOBAL_POSITION_INT payload */
-#define LEN_GPS_STATUS   101u         /* full GPS_STATUS payload    */
-#define MAX_PAY         255u
+#define LEN_GPI_MIN      28u
+#define LEN_GPS_STATUS  101u
+#define MAX_PAY        255u
 
 #define SCRIPT_PATH "/usr/bin/channels.sh"
 
@@ -78,20 +78,18 @@ static bool parse_byte(uint8_t b, frame_t *out)
         else if (b == STX_V2) { memset(&cur, 0, sizeof cur); cur.ver = 2; st = V2_LEN; }
         break;
 
-/* ---------- MAVLink-1 ---------- */
+/* MAVLink-1 */
     case V1_LEN:  cur.len = b; idx = 0;               st = V1_SEQ;  break;
     case V1_SEQ:                                      st = V1_SYS;  break;
     case V1_SYS:  cur.sysid  = b;                     st = V1_COMP; break;
     case V1_COMP: cur.compid = b;                     st = V1_ID;   break;
     case V1_ID:   cur.msgid  = b;                     st = cur.len ? V1_PAY : V1_C1; break;
-    case V1_PAY:
-        if (idx < (int)MAX_PAY) cur.pay[idx] = b;
-        if (++idx == (int)cur.len) st = V1_C1;
-        break;
-    case V1_C1: st = V1_C2; break;
-    case V1_C2: *out = cur; st = IDLE; return true;
+    case V1_PAY:  if (idx < MAX_PAY) cur.pay[idx] = b;
+                  if (++idx == cur.len) st = V1_C1; break;
+    case V1_C1:   st = V1_C2; break;
+    case V1_C2:   *out = cur; st = IDLE; return true;
 
-/* ---------- MAVLink-2 ---------- */
+/* MAVLink-2 */
     case V2_LEN:  cur.len = b;                        st = V2_INCF; break;
     case V2_INCF: incf = b;                           st = V2_COMPF;break;
     case V2_COMPF:                                    st = V2_SEQ;  break;
@@ -102,18 +100,12 @@ static bool parse_byte(uint8_t b, frame_t *out)
     case V2_ID1:  cur.msgid |= (uint32_t)b << 8;      st = V2_ID2;  break;
     case V2_ID2:  cur.msgid |= (uint32_t)b << 16; idx = 0;
                   st = cur.len ? V2_PAY : V2_C1;       break;
-    case V2_PAY:
-        if (idx < (int)MAX_PAY) cur.pay[idx] = b;
-        if (++idx == (int)cur.len) st = V2_C1;
-        break;
-    case V2_C1: st = V2_C2; break;
-    case V2_C2:
-        if (incf & 1) { sig_left = 13; st = V2_SIG; }
-        else          { *out = cur; st = IDLE; return true; }
-        break;
-    case V2_SIG:
-        if (--sig_left == 0) { *out = cur; st = IDLE; return true; }
-        break;
+    case V2_PAY:  if (idx < MAX_PAY) cur.pay[idx] = b;
+                  if (++idx == cur.len) st = V2_C1;    break;
+    case V2_C1:   st = V2_C2; break;
+    case V2_C2:   if (incf & 1){ sig_left = 13; st = V2_SIG; }
+                  else { *out = cur; st = IDLE; return true; } break;
+    case V2_SIG:  if (--sig_left == 0){ *out = cur; st = IDLE; return true; } break;
     }
     return false;
 }
@@ -130,7 +122,7 @@ typedef struct {
 typedef struct {
     uint32_t period; uint64_t next_ms;
     uint32_t frames, bytes, rc_cnt, radio_cnt;
-    uint32_t gpi_cnt, gpss_cnt;                    /* NEW (33 & 25)  */
+    uint32_t gpi_cnt, gpss_cnt;
     uint32_t udp_rx, udp_tx;
 
 /* RC override */
@@ -146,7 +138,7 @@ typedef struct {
     int16_t  vx, vy, vz;
     uint16_t hdg;
 
-/* GPS_STATUS (arrays are fixed length 20) */
+/* GPS_STATUS */
     uint8_t  sats_visible;
     uint8_t  prn[20], used[20], elev[20], azim[20], snr[20];
 
@@ -170,24 +162,24 @@ typedef struct {
     bool no_serial;
 } cfg_t;
 
-/* ---------- help message ---------- */
+/* help */
 static void print_help(const char *p)
 {
     fprintf(stderr,
         "Usage: %s [options]\n"
         "  -d, --device PATH        Serial device (default %s)\n"
         "  -b, --baud RATE          Baud-rate   (default %d)\n"
-        "  -n, --no-serial          Disable serial completely\n"
+        "  -n, --no-serial          Disable serial port\n"
         "  -u, --udp-in PORT        Listen for MAVLink on UDP PORT\n"
-        "  -o, --udp-out HOST:PORT  Forward all frames to HOST:PORT\n"
-        "  -p, --period MS          Stats period in ms (default %u)\n"
-        "  -r, --raw                Hex-dump every frame\n"
+        "  -o, --udp-out HOST:PORT  Forward frames to HOST:PORT\n"
+        "  -p, --period MS          Stats window in ms (default %u)\n"
+        "  -r, --raw                Hex-dump each frame\n"
         "  -c, --command-parse      Enable RC-triggered scripts\n"
-        "      --channels LIST      Watch only LIST (comma sep 1-16)\n"
-        "      --min-change VAL     Delta before trigger (default 100)\n"
+        "      --channels LIST      Comma list (1-16) to watch\n"
+        "      --min-change VAL     Delta for trigger (default 100)\n"
         "      --persist MS         Value must persist (default 500)\n"
         "      --pause MS           Pause after exec (default 500)\n"
-        "  -h, --help               This help text\n",
+        "  -h, --help               Show this help\n",
         p, DEF_DEV, DEF_BAUD, DEF_PER);
 }
 
@@ -202,8 +194,8 @@ static void cfg_default(cfg_t *c)
 static void parse_mask(cfg_t *c, const char *s)
 {
     c->chan_mask = 0;
-    while (*s) {
-        int n = strtol(s, (char **)&s, 10);
+    while (*s){
+        int n = strtol(s, (char**)&s, 10);
         if (n < 1 || n > 16) die("channel list");
         c->chan_mask |= 1u << (n - 1);
         if (*s == ',') ++s;
@@ -211,13 +203,14 @@ static void parse_mask(cfg_t *c, const char *s)
 }
 static void parse_udp_out(cfg_t *c, const char *s)
 {
-    const char *colon = strchr(s, ':');
-    if (!colon) die("udp-out host:port");
-    size_t hl = (size_t)(colon - s);
+    const char *cpos = strchr(s, ':');
+    if (!cpos) die("udp-out host:port");
+    size_t hl = (size_t)(cpos - s);
     char *h = malloc(hl + 1); if (!h) die("malloc");
     memcpy(h, s, hl); h[hl] = 0;
-    c->udp_out_host = h; c->udp_out_port = colon + 1;
+    c->udp_out_host = h; c->udp_out_port = cpos + 1;
 }
+
 static void parse_cli(int ac, char **av, cfg_t *c)
 {
     static const struct option L[] = {
@@ -230,7 +223,7 @@ static void parse_cli(int ac, char **av, cfg_t *c)
     };
     int o, idx;
     while ((o = getopt_long(ac, av, "d:b:p:rcu:o:nh", L, &idx)) != -1)
-        switch (o) {
+        switch (o){
         case 'd': c->dev = optarg; break;
         case 'b': c->baud = atoi(optarg); break;
         case 'p': c->period = atoi(optarg); break;
@@ -248,22 +241,21 @@ static void parse_cli(int ac, char **av, cfg_t *c)
         }
 
     if (c->no_serial) c->dev = NULL;
-    if (!c->dev && !c->udp_in_port && !c->udp_out_host) {
-        fprintf(stderr,"Need at least one of serial, udp-in, udp-out\n");
-        exit(1);
+    if (!c->dev && !c->udp_in_port && !c->udp_out_host){
+        fprintf(stderr,"Need serial, udp-in or udp-out\n"); exit(1);
     }
 }
 
 /* --------------------------------------------------------------- serial */
 static int open_serial(const cfg_t *cfg)
 {
-    for (;;) {
+    for (;;){
         int fd = open(cfg->dev, O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (fd >= 0) {
+        if (fd >= 0){
             struct termios t={0};
-            if (tcgetattr(fd,&t)==0) {
-                cfmakeraw(&t); t.c_cflag|=CLOCAL|CREAD;
-                cfsetispeed(&t, B460800); cfsetospeed(&t, B460800);
+            if (tcgetattr(fd,&t)==0){
+                cfmakeraw(&t); t.c_cflag |= CLOCAL | CREAD;
+                cfsetispeed(&t,B460800); cfsetospeed(&t,B460800);
                 if (tcsetattr(fd,TCSANOW,&t)==0) return fd;
             }
             close(fd);
@@ -281,21 +273,21 @@ static int mk_nonblock(int fd)
 }
 static int open_udp_in(int p)
 {
-    int fd=socket(AF_INET,SOCK_DGRAM,0); if(fd<0)die("sock in");
-    int y=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&y,sizeof y);
+    int fd = socket(AF_INET,SOCK_DGRAM,0); if (fd<0) die("sock in");
+    int yes=1; setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof yes);
     struct sockaddr_in a={.sin_family=AF_INET,.sin_addr.s_addr=htonl(INADDR_ANY),
                           .sin_port=htons(p)};
-    if(bind(fd,(struct sockaddr*)&a,sizeof a)<0)die("bind");
+    if (bind(fd,(struct sockaddr*)&a,sizeof a)<0) die("bind");
     return mk_nonblock(fd);
 }
 static int open_udp_out(const char*host,const char*port)
 {
     struct addrinfo h={.ai_family=AF_INET,.ai_socktype=SOCK_DGRAM},*res;
     int r=getaddrinfo(host,port,&h,&res);
-    if(r) {fprintf(stderr,"udp-out %s\n",gai_strerror(r)); exit(1);}
+    if (r){ fprintf(stderr,"udp-out %s\n",gai_strerror(r)); exit(1); }
     int fd=socket(res->ai_family,res->ai_socktype,res->ai_protocol);
-    if(fd<0)die("sock out");
-    if(connect(fd,res->ai_addr,res->ai_addrlen)<0)die("connect");
+    if (fd<0) die("sock out");
+    if (connect(fd,res->ai_addr,res->ai_addrlen)<0) die("connect");
     freeaddrinfo(res); return mk_nonblock(fd);
 }
 
@@ -303,8 +295,8 @@ static int open_udp_out(const char*host,const char*port)
 static int run_script(int ch,int val)
 {
     pid_t p=fork();
-    if(!p){
-        char c[4],v[8]; snprintf(c,sizeof c,"%d",ch); snprintf(v,sizeof v,"%d",val);
+    if (!p){
+        char c[4], v[8]; snprintf(c,sizeof c,"%d",ch); snprintf(v,sizeof v,"%d",val);
         execl(SCRIPT_PATH,SCRIPT_PATH,c,v,(char*)NULL); _exit(127);
     }
     int st; waitpid(p,&st,0);
@@ -317,15 +309,15 @@ int main(int argc,char**argv)
     cfg_t cfg; cfg_default(&cfg); parse_cli(argc,argv,&cfg);
 
     int fd_serial=-1;
-    if(cfg.dev) fd_serial=open_serial(&cfg);
+    if (cfg.dev) fd_serial=open_serial(&cfg);
     int fd_udp_in=-1;
-    if(cfg.udp_in_port) fd_udp_in=open_udp_in(cfg.udp_in_port);
+    if (cfg.udp_in_port) fd_udp_in=open_udp_in(cfg.udp_in_port);
     int fd_udp_out=-1;
-    if(cfg.udp_out_host) fd_udp_out=open_udp_out(cfg.udp_out_host,cfg.udp_out_port);
+    if (cfg.udp_out_host) fd_udp_out=open_udp_out(cfg.udp_out_host,cfg.udp_out_port);
 
     printf("Listening %sserial%s UDP-in=%s UDP-out=%s raw=%s cmd=%s period=%u\n",
-           cfg.dev?"":"no-", cfg.dev?cfg.dev:"",
-           cfg.udp_in_port?"ON":"OFF",
+           cfg.dev?"": "no-", cfg.dev?cfg.dev:"",
+           cfg.udp_in_port ?"ON":"OFF",
            cfg.udp_out_host?"ON":"OFF",
            cfg.raw?"on":"off", cfg.cmd_en?"on":"off", cfg.period);
 
@@ -334,56 +326,55 @@ int main(int argc,char**argv)
     stat_reset(&st);
     ch_state_t ch[16]={0}; uint64_t next_ok_exec=0;
 
-    for(;;){
+    for (;;){
         struct pollfd pf[3]; int nf=0;
-        if(fd_serial>=0) pf[nf++] = (struct pollfd){fd_serial,POLLIN,0};
-        if(fd_udp_in>=0) pf[nf++] = (struct pollfd){fd_udp_in ,POLLIN,0};
+        if (fd_serial>=0) pf[nf++] = (struct pollfd){fd_serial,POLLIN,0};
+        if (fd_udp_in>=0) pf[nf++] = (struct pollfd){fd_udp_in ,POLLIN,0};
         int pr=poll(pf,nf,50);
-        if(pr<0 && errno!=EINTR) pr=0;
+        if (pr<0 && errno!=EINTR) pr=0;
 
-        /* ---------- RX loop ---------- */
-        for(int i=0;i<nf;++i) if(pf[i].revents&POLLIN) {
-            int fd=pf[i].fd;
-            ssize_t n=(fd==fd_serial)?read(fd,buf,sizeof buf)
-                                     :recv(fd,buf,sizeof buf,0);
-            if(n<=0){
-                if(fd==fd_serial && (n==0||(errno!=EAGAIN&&errno!=EINTR))){
+        /* ---------- RX ---------- */
+        for (int i=0;i<nf;++i) if (pf[i].revents&POLLIN){
+            int fd = pf[i].fd;
+            ssize_t n = (fd==fd_serial)?read(fd,buf,sizeof buf)
+                                       :recv(fd,buf,sizeof buf,0);
+            if (n<=0){
+                if (fd==fd_serial && (n==0||(errno!=EAGAIN&&errno!=EINTR))){
                     perror("serial read"); close(fd_serial); fd_serial=-1; sleep(3);
-                    if(cfg.dev) fd_serial=open_serial(&cfg);
+                    if (cfg.dev) fd_serial=open_serial(&cfg);
                 }
                 continue;
             }
             st.bytes+=(uint32_t)n;
-            if(fd==fd_udp_in) st.udp_rx+=(uint32_t)n;
-            if(fd==fd_udp_in && fd_serial>=0) write(fd_serial,buf,n);
-            if(fd_udp_out>=0 && n>0){
+            if (fd==fd_udp_in) st.udp_rx+=(uint32_t)n;
+            if (fd==fd_udp_in && fd_serial>=0) write(fd_serial,buf,n);
+            if (fd_udp_out>=0 && n>0){
                 ssize_t w=send(fd_udp_out,buf,n,0);
-                if(w>0) st.udp_tx+=(uint32_t)w;
+                if (w>0) st.udp_tx+=(uint32_t)w;
             }
 
-            for(ssize_t ix=0;ix<n;++ix) if(parse_byte(buf[ix],&f)){
+            for (ssize_t ix=0; ix<n; ++ix) if (parse_byte(buf[ix],&f)){
                 st.frames++;
 
-                switch(f.msgid){
-                /* -------- RC_OVERRIDE ------ */
-                case ID_RC_OVERRIDE:{
-                    if(f.len<LEN_RC_MIN) break;
+                switch (f.msgid){
+                case ID_RC_OVERRIDE: {
+                    if (f.len<LEN_RC_MIN) break;
                     st.rc_cnt++; int so=f.len-2;
                     st.rc_sys=f.pay[so]; st.rc_comp=f.pay[so+1];
                     const uint16_t*vals=(const uint16_t*)f.pay;
-                    for(int c=0;c<16;++c) st.rc[c]=vals[c];
+                    for (int c=0;c<16;++c) st.rc[c]=vals[c];
 
-                    if(cfg.cmd_en){
+                    if (cfg.cmd_en){
                         uint64_t now=ms_now();
-                        for(int c=0;c<16;++c) if(cfg.chan_mask&(1u<<c)){
+                        for (int c=0;c<16;++c) if (cfg.chan_mask&(1u<<c)){
                             int val=vals[c]; ch_state_t*s=&ch[c];
-                            if(!s->last) s->last=val;
+                            if (!s->last) s->last=val;
                             int diff=abs(val-s->last);
 
-                            if(s->pending){
-                                if(diff<cfg.min_delta){s->pending=false; continue;}
-                                if(now-s->start_ms>=cfg.persist_ms &&
-                                   now>=next_ok_exec && st.exec_cnt<32){
+                            if (s->pending){
+                                if (diff<cfg.min_delta){ s->pending=false; continue; }
+                                if (now-s->start_ms>=cfg.persist_ms &&
+                                    now>=next_ok_exec && st.exec_cnt<32){
                                     uint64_t t0=ms_now();
                                     run_script(c+1,val);
                                     int rt=(int)(ms_now()-t0);
@@ -392,116 +383,101 @@ int main(int argc,char**argv)
                                     next_ok_exec=now+cfg.pause_ms;
                                     s->last=val; s->pending=false;
                                 }
-                            }else if(diff>=cfg.min_delta){
+                            } else if (diff>=cfg.min_delta){
                                 s->pending=true; s->old_val=s->last; s->start_ms=now;
                             }
                         }
                     }
                     break;
                 }
-                /* -------- RADIO_STATUS ----- */
                 case ID_RADIO_STATUS:
-                    if(f.len<LEN_RAD_MIN) break;
+                    if (f.len<LEN_RAD_MIN) break;
                     st.radio_cnt++;
                     st.rssi=f.pay[4]; st.remrssi=f.pay[5];
                     st.txbuf=f.pay[6]; st.noise=f.pay[7];
                     break;
 
-                /* -------- GLOBAL_POSITION_INT (33) ----- */
                 case ID_GLOBAL_POSITION_INT:
-                    if(f.len<LEN_GPI_MIN) break;
+                    if (f.len<LEN_GPI_MIN) break;
                     st.gpi_cnt++;
-                    st.gpi_time_ms = *(const uint32_t*)(f.pay+0);
-                    st.lat         = *(const int32_t *)(f.pay+4);
-                    st.lon         = *(const int32_t *)(f.pay+8);
-                    st.alt         = *(const int32_t *)(f.pay+12);
-                    st.rel_alt     = *(const int32_t *)(f.pay+16);
-                    st.vx          = *(const int16_t *)(f.pay+20);
-                    st.vy          = *(const int16_t *)(f.pay+22);
-                    st.vz          = *(const int16_t *)(f.pay+24);
-                    st.hdg         = *(const uint16_t*)(f.pay+26);
+                    st.gpi_time_ms=*(uint32_t*)(f.pay+0);
+                    st.lat        =*(int32_t *)(f.pay+4);
+                    st.lon        =*(int32_t *)(f.pay+8);
+                    st.alt        =*(int32_t *)(f.pay+12);
+                    st.rel_alt    =*(int32_t *)(f.pay+16);
+                    st.vx         =*(int16_t *)(f.pay+20);
+                    st.vy         =*(int16_t *)(f.pay+22);
+                    st.vz         =*(int16_t *)(f.pay+24);
+                    st.hdg        =*(uint16_t*)(f.pay+26);
                     break;
 
-                /* -------- GPS_STATUS (25) -------------- */
                 case ID_GPS_STATUS:
-                    if(f.len<1) break;
+                    if (f.len<1) break;
                     st.gpss_cnt++;
-                    memset(st.prn ,0xFF,sizeof st.prn);
-                    memset(st.used,0,sizeof st.used);
-                    memset(st.elev,0xFF,sizeof st.elev);
-                    memset(st.azim,0xFF,sizeof st.azim);
-                    memset(st.snr ,0xFF,sizeof st.snr);
-
-                    st.sats_visible = f.pay[0];
-                    if(f.len>=LEN_GPS_STATUS){
-                        memcpy(st.prn , f.pay+1,  20);
-                        memcpy(st.used, f.pay+21, 20);
-                        memcpy(st.elev, f.pay+41, 20);
-                        memcpy(st.azim, f.pay+61, 20);
-                        memcpy(st.snr , f.pay+81, 20);
+                    memset(&st.prn, 0, sizeof st.prn);   /* clear slots */
+                    st.sats_visible=f.pay[0];
+                    if (f.len>=LEN_GPS_STATUS){
+                        memcpy(st.prn ,f.pay+1 ,20);
+                        memcpy(st.used,f.pay+21,20);
+                        memcpy(st.elev,f.pay+41,20);
+                        memcpy(st.azim,f.pay+61,20);
+                        memcpy(st.snr ,f.pay+81,20);
                     }else{
-                        /* partial payloads – copy what’s there */
-                        size_t avail = f.len - 1;
-                        size_t chunk = avail/5;
-                        if(chunk>20) chunk=20;
+                        size_t avail=f.len-1, chunk=avail/5; if(chunk>20)chunk=20;
                         const uint8_t*ptr=f.pay+1;
-                        memcpy(st.prn , ptr, chunk); ptr+=chunk;
-                        memcpy(st.used, ptr, chunk); ptr+=chunk;
-                        memcpy(st.elev, ptr, chunk); ptr+=chunk;
-                        memcpy(st.azim, ptr, chunk); ptr+=chunk;
-                        memcpy(st.snr , ptr, chunk);
+                        memcpy(st.prn ,ptr,chunk); ptr+=chunk;
+                        memcpy(st.used,ptr,chunk); ptr+=chunk;
+                        memcpy(st.elev,ptr,chunk); ptr+=chunk;
+                        memcpy(st.azim,ptr,chunk); ptr+=chunk;
+                        memcpy(st.snr ,ptr,chunk);
                     }
                     break;
 
                 default: break;
                 }
 
-                if(cfg.raw){
+                if (cfg.raw){
                     printf("RAW v=%u id=%"PRIu32" len=%u |",f.ver,f.msgid,f.len);
-                    uint8_t show = f.len>32?32:f.len;
-                    for(uint8_t j=0;j<show;++j) printf(" %02X",f.pay[j]);
-                    if(f.len>show) printf(" …"); puts("");
+                    uint8_t show=f.len>32?32:f.len;
+                    for (uint8_t j=0;j<show;++j) printf(" %02X",f.pay[j]);
+                    if (f.len>show) printf(" …"); puts("");
                 }
             }
         }
 
         /* ---------- periodic stats ---------- */
         uint64_t now=ms_now();
-        if(now>=st.next_ms){
+        if (now>=st.next_ms){
             printf("%"PRIu64" MAVLINK_STATS %u:%u:%u:%u:%u:%u:%u:%u\n",
                    now,cfg.period,st.frames,
                    (st.rc_cnt?1:0)+(st.radio_cnt?1:0)+(st.gpi_cnt?1:0)+(st.gpss_cnt?1:0),
                    st.bytes,st.udp_rx,st.udp_tx,st.gpi_cnt,st.gpss_cnt);
 
-            /* RC */
-            printf("%"PRIu64" RC_CHANNELS_OVERRIDE %u %u %u ",now,st.rc_cnt,st.rc_sys,st.rc_comp);
-            for(int i=0;i<16;++i) printf("%u%c",st.rc[i],i==15?'\n':':');
-
-            /* Radio */
-            printf("%"PRIu64" RADIO_STATUS %u %u:%u:%u:%u\n",
-                   now,st.radio_cnt,st.rssi,st.remrssi,st.txbuf,st.noise);
-
-            /* GLOBAL_POSITION_INT */
-            printf("%"PRIu64" GLOBAL_POSITION_INT %u %"PRIu32" %"
-                   PRId32":%"PRId32":%"PRId32":%"PRId32":%"
-                   PRId16":%"PRId16":%"PRId16":%"PRIu16"\n",
-                   now,st.gpi_cnt,
-                   st.gpi_cnt?st.gpi_time_ms:0,
-                   st.gpi_cnt?st.lat:-1,     st.gpi_cnt?st.lon:-1,
-                   st.gpi_cnt?st.alt:-1,     st.gpi_cnt?st.rel_alt:-1,
-                   st.gpi_cnt?st.vx:-1,      st.gpi_cnt?st.vy:-1,
-                   st.gpi_cnt?st.vz:-1,      st.gpi_cnt?st.hdg:65535);
-
-            /* GPS_STATUS */
-            printf("%"PRIu64" GPS_STATUS %u %u ",now,st.gpss_cnt,st.sats_visible);
-            for(int i=0;i<20;++i){
-                printf("%u:%u:%u:%u:%u%c",
-                       st.prn[i],st.used[i],st.elev[i],st.azim[i],st.snr[i],
-                       i==19?'\n':'|');
+            if (st.rc_cnt){
+                printf("%"PRIu64" RC_CHANNELS_OVERRIDE %u %u %u ",now,st.rc_cnt,st.rc_sys,st.rc_comp);
+                for (int i=0;i<16;++i) printf("%u%c",st.rc[i],i==15?'\n':':');
             }
-
-            /* Execs */
-            for(int i=0;i<st.exec_cnt;++i){
+            if (st.radio_cnt){
+                printf("%"PRIu64" RADIO_STATUS %u %u:%u:%u:%u\n",
+                       now,st.radio_cnt,st.rssi,st.remrssi,st.txbuf,st.noise);
+            }
+            if (st.gpi_cnt){
+                printf("%"PRIu64" GLOBAL_POSITION_INT %u %"PRIu32" %"
+                       PRId32":%"PRId32":%"PRId32":%"PRId32":%"
+                       PRId16":%"PRId16":%"PRId16":%"PRIu16"\n",
+                       now,st.gpi_cnt,st.gpi_time_ms,
+                       st.lat,st.lon,st.alt,st.rel_alt,
+                       st.vx,st.vy,st.vz,st.hdg);
+            }
+            if (st.gpss_cnt){
+                printf("%"PRIu64" GPS_STATUS %u %u ",now,st.gpss_cnt,st.sats_visible);
+                for (int i=0;i<20;++i){
+                    printf("%u:%u:%u:%u:%u%c",
+                           st.prn[i],st.used[i],st.elev[i],st.azim[i],st.snr[i],
+                           i==19?'\n':'|');
+                }
+            }
+            for (int i=0;i<st.exec_cnt;++i){
                 printf("%"PRIu64" MAVLINK_EXEC %d:%d:%d:%d:%d\n",
                        now,i+1,st.execs[i].ch,st.execs[i].old_v,
                        st.execs[i].new_v,st.execs[i].rt);
