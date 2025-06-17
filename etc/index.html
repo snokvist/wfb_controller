@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Thread-Manager</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    :root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+    header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
+    header h1{margin:0;font-size:1rem}
+    button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
+    .statsline{font-size:.9rem;width:100%;margin-top:.2rem}
+    .tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
+    .tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
+    .tab.active{background:#fff;border-bottom:3px solid var(--accent)}
+    section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
+    .thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
+    .chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
+    .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
+    .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
+    canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
+    /* MAVLINK section styles */
+    #mavlink .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
+    #mavlink .status-box,#mavlink .exec-box,
+    #gps .status-box{background:var(--card);border-radius:6px;box-shadow:0 1px 3px #0002;padding:.5rem .7rem;margin:.5rem 0;font-family:monospace;font-size:.8rem;white-space:pre-wrap}
+    /* GPS section tweaks */
+    #gps .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
+    #gpsMapWrap{max-width:500px;margin:.7rem auto}
+    #gpsMapChart{width:500px!important;height:500px!important}
+  </style>
+
+  <!-- Global Chart.js defaults -->
+  <script>
+    Chart.defaults.plugins.decimation = { enabled:true, algorithm:'lttb', samples:50 };
+  </script>
+</head>
+
+<body>
+  <header>
+    <h1>Thread-Manager</h1>
+    <button id="mode"   class="btn">STATS</button>
+    <button id="mavBtn" class="btn">MAVLINK</button>
+    <button id="gpsBtn" class="btn">GPS</button>
+    <div id="bytesline" class="statsline"></div>
+  </header>
+
+  <!-- METRICS (RX/TX) -------------------------------------------------------->
+  <div id="metrics">
+    <div class="tabs">
+      <button class="tab active" data-tab="rx">RX</button>
+      <button class="tab"        data-tab="tx">TX</button>
+    </div>
+    <section id="rx" class="tab-content active"></section>
+    <section id="tx" class="tab-content"></section>
+  </div>
+
+  <!-- MAVLINK --------------------------------------------------------------->
+  <section id="mavlink" style="display:none">
+    <div class="chart bar-chart-container">
+      <div class="bar-chart-title">RC_CHANNELS_OVERRIDE (Channels 1–16)</div>
+      <canvas id="channelsBarChart"></canvas>
+    </div>
+    <div class="status-box" id="radioStatusBox">Loading RADIO_STATUS…</div>
+    <div class="exec-box"   id="execBox">Loading MAVLINK_EXEC…</div>
+  </section>
+
+  <!-- GPS ------------------------------------------------------------------->
+  <section id="gps" style="display:none">
+    <div class="chart bar-chart-container">
+      <div class="bar-chart-title">Satellite SNR (used ✔︎ = green, unused = grey)</div>
+      <canvas id="gpsStatusBarChart"></canvas>
+    </div>
+
+    <div class="status-box" id="positionText">Loading position…</div>
+
+    <div id="gpsMapWrap" class="chart">
+      <div class="bar-chart-title">Latest 60 track points (100 m × 100 m)</div>
+      <canvas id="gpsMapChart" width="500" height="500"></canvas>
+    </div>
+  </section>
+
+  <script>
+    /* ---------- constants & helpers ---------- */
+    const MAX   = 100;
+    const pool  = ['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
+    const colour = i => pool[i % pool.length];
+    const charts   = new Map();
+    const wrappers = new Map();
+    const ckey = (tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
+    const ERR_KEYS = ['bad','lost','rec','dec'];
+    const THR_KEYS = ['all','out','uniq'];
+
+    /* state */
+    let mode='graphs', view='metrics';
+    const interval=1000;      // refresh period (ms)
+    let timer, ctrl=null;     // fetch AbortController
+
+    /* MAVLink state */
+    let mavInit=false;
+    let channelsBarChart=null;
+
+    /* GPS state */
+    let gpsInit=false;
+    let gpsStatusBarChart=null;
+    let gpsMapChart=null;
+    let gpsHistory=[];          // up to 60 {x,y}
+    let originLat=null, originLon=null;
+
+    /* pause updates when tab hidden */
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden) clearTimeout(timer); else sched();
+    });
+
+    /* ---------- DOM controls ---------- */
+    const modeBtn   = document.getElementById('mode');
+    const mavBtn    = document.getElementById('mavBtn');
+    const gpsBtn    = document.getElementById('gpsBtn');
+    const bytesLine = document.getElementById('bytesline');
+
+    modeBtn.onclick=()=>{
+      if(view!=='metrics') switchTo('metrics');
+      mode = (mode==='stats') ? 'graphs' : 'stats';
+      modeBtn.textContent=(mode==='stats') ? 'GRAPHS' : 'STATS';
+      if(mode==='graphs'){ wrappers.forEach(w=>w.remove()); wrappers.clear(); charts.clear(); }
+      refresh();
+    };
+    mavBtn.onclick=()=>{ view==='mavlink'?switchTo('metrics'):switchTo('mavlink'); };
+    gpsBtn.onclick=()=>{ view==='gps'   ?switchTo('metrics'):switchTo('gps'); };
+
+    document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+      document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));
+      document.querySelectorAll('.tab-content').forEach(s=>s.classList.toggle('active',s.id===b.dataset.tab));
+    });
+
+    function switchTo(target){
+      ['metrics','mavlink','gps'].forEach(id=>document.getElementById(id).style.display='none');
+      document.getElementById(target).style.display='';
+      view=target;
+      if(target==='mavlink'){ if(!mavInit) initMavlink(); refreshMavlink(); }
+      if(target==='gps'){ if(!gpsInit) initGPS(); refreshGPS(); }
+      if(target==='metrics') refresh();
+    }
+
+    /* ---------- scheduler ---------- */
+    function sched(){ clearTimeout(timer);
+      if(view==='metrics') refresh();
+      else if(view==='mavlink') refreshMavlink();
+      else if(view==='gps') refreshGPS();
+      timer=setTimeout(sched,interval);
+    } sched();
+
+    /* ---------- MAIN METRICS ---------- */
+    const statsState={};
+
+    async function refresh(){
+      try{
+        if(ctrl) ctrl.abort(); ctrl=new AbortController();
+        const r=await fetch('/metrics',{signal:ctrl.signal}); if(!r.ok) return;
+        const data=await r.json();
+
+        let inB=0,outB=0;
+        Object.values(data).forEach(t=>{
+          const p=t.PKT?.at(-1); if(p){ inB+=p.count_b_all; outB+=p.count_b_outgoing; }
+        });
+        bytesLine.textContent=`Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
+
+        drawTab('rx',data,'RX_ANT',s=>s.rssi.avg);
+        drawTab('tx',data,'TX_ANT',s=>s.latency.avg);
+      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+    }
+
+    /* ---------- TAB renderer (RX/TX) ---------- */
+    function drawTab(tabId,data,antKey,ySel){
+      const cont=document.getElementById(tabId);
+      if(!statsState[tabId]) statsState[tabId]={};
+
+      if(mode==='stats'){
+        const frag=document.createDocumentFragment();
+        const tabState=statsState[tabId];
+
+        Object.entries(data).forEach(([thr,kinds])=>{
+          if(!kinds[antKey]?.length) return;
+          if(!tabState[thr]) tabState[thr]={pktTs:null,pktCount:0,ants:{}};
+          const st=tabState[thr];
+
+          const th=document.createElement('div'); th.className='thread'; th.textContent=thr; frag.appendChild(th);
+
+          let html='';
+          if(kinds.PKT?.length){
+            const p=kinds.PKT.at(-1);
+            if(p.ts===st.pktTs) st.pktCount++; else{ st.pktTs=p.ts; st.pktCount=0; }
+            if(st.pktCount<3){
+              const hl=st.pktCount>0?'background:yellow;':'';
+              html+=`<span style="${hl}">PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}</span>\n`;
+            }
+          }
+
+          const latestByAnt={}; kinds[antKey].forEach(s=>latestByAnt[s.antenna_id]=s);
+          Object.keys(latestByAnt).sort().forEach(id=>{
+            const s=latestByAnt[id];
+            const ast=st.ants[id]||{ts:null,count:0};
+            if(s.ts===ast.ts) ast.count++; else{ ast.ts=s.ts; ast.count=0; }
+            st.ants[id]=ast; if(ast.count>=3) return;
+            const hl=ast.count>0?'background:yellow;':'';
+            if(s.latency){
+              html+=`<span style="${hl}">A:${id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.avg}ms</span>\n`;
+            }else{
+              const dloss=(kinds.PKT?.at(-1)?.count_p_uniq||0)-s.packet_count;
+              html+=`<span style="${hl}">A:${id} | BW=${s.bw}MHz | F=${s.freq}MHz | PC=${s.packet_count} | RA=${s.rssi.avg}dBm | SA=${s.snr.avg}dB | dloss=${dloss}</span>\n`;
+            }
+          });
+
+          const card=document.createElement('div'); card.className='card'; card.innerHTML=html.trim();
+          frag.appendChild(card);
+        });
+        cont.replaceChildren(frag);
+        return;
+      }
+
+      /* GRAPHS mode */
+      cont.querySelectorAll('.thread,.card').forEach(el=>el.remove());
+      for(const [thr,kinds] of Object.entries(data)){
+        if(!kinds[antKey]?.length) continue;
+        renderStrip(tabId,thr,'ant',`${thr} – ANTENNA`,kinds[antKey],s=>s.antenna_id,v=>v.at(-1),ySel);
+        if(kinds.PKT?.length){
+          renderStrip(tabId,thr,'err',`${thr} – ERRORS`,
+            [kinds.PKT.at(-1)],()=>1,
+            p=>({bad:p.count_p_bad,lost:p.count_p_lost,rec:p.count_p_fec_recovered,dec:p.count_p_dec_err}),
+            null,{min:0},ERR_KEYS);
+          renderStrip(tabId,thr,'thr',`${thr} – THROUGHPUT`,
+            [kinds.PKT.at(-1)],()=>1,
+            p=>({all:p.count_p_all,out:p.count_p_outgoing,uniq:p.count_p_uniq}),
+            null,{min:0},THR_KEYS);
+        }
+      }
+    }
+
+    /* ---------- generic strip chart ---------- */
+    function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
+      const id=ckey(tab,thr,sfx);
+      let wrap=wrappers.get(id);
+
+      if(!wrap){
+        wrap=document.createElement('div');
+        wrap.className='chart';
+        wrap.innerHTML=`<div class="chart-title">${title}</div><canvas></canvas>`;
+        document.getElementById(tab).appendChild(wrap);
+        const ctx=wrap.querySelector('canvas');
+        charts.set(id,new Chart(ctx,{
+          type:'line',
+          data:{labels:[...Array(MAX).keys()],datasets:[]},
+          options:{
+            animation:false,responsive:true,maintainAspectRatio:false,spanGaps:true,
+            elements:{point:{radius:0}},
+            scales:{x:{type:'linear',min:0,max:MAX-1,ticks:{display:false}},
+                    y:{beginAtZero:true,ticks:{precision:0},...yExtra}},
+            plugins:{legend:{display:true,position:'bottom'}}
+          }
+        }));
+        wrappers.set(id,wrap);
+      }
+      const chart=charts.get(id);
+      const used=new Set();
+
+      if(sfx==='ant'){
+        const groups={}; samples.forEach(s=>(groups[keyFn(s)]??=[]).push(ySel(s)));
+        Object.keys(groups).sort().forEach((lab,idx)=>{
+          let ds=chart.data.datasets.find(d=>d.label===lab);
+          if(!ds){
+            ds={label:lab,borderColor:colour(idx),backgroundColor:colour(idx),tension:0,fill:false,data:Array(MAX).fill(null)};
+            chart.data.datasets.push(ds);
+          }
+          ds.data.push(valFn(groups[lab])); if(ds.data.length>MAX) ds.data.shift();
+          used.add(ds);
+        });
+      }else{
+        const obj=valFn(samples.at(-1));
+        (fixedOrder||Object.keys(obj).sort()).forEach((lab,idx)=>{
+          let ds=chart.data.datasets.find(d=>d.label===lab);
+          if(!ds){
+            ds={label:lab,borderColor:colour(idx),backgroundColor:colour(idx),tension:0,fill:false,data:Array(MAX).fill(null)};
+            chart.data.datasets.push(ds);
+          }
+          ds.data.push(obj[lab]); if(ds.data.length>MAX) ds.data.shift();
+          used.add(ds);
+        });
+      }
+      chart.data.datasets=chart.data.datasets.filter(d=>used.has(d));
+      markDirty(chart);
+    }
+
+    /* ---------- batch-update helper ---------- */
+    const dirtyCharts=new Set(); let chartFlush=false;
+    function markDirty(chart){
+      dirtyCharts.add(chart);
+      if(!chartFlush){
+        chartFlush=true;
+        requestAnimationFrame(()=>{
+          dirtyCharts.forEach(c=>c.update('none'));
+          dirtyCharts.clear(); chartFlush=false;
+        });
+      }
+    }
+
+    /* ---------- MAVLINK page ---------- */
+    function initMavlink(){
+      const ctx=document.getElementById('channelsBarChart').getContext('2d');
+      channelsBarChart=new Chart(ctx,{
+        type:'bar',
+        data:{labels:Array.from({length:16},(_,i)=>`Ch ${i+1}`),
+              datasets:[{label:'PWM',data:Array(16).fill(null),backgroundColor:'#1976d2'}]},
+        options:{animation:false,responsive:true,maintainAspectRatio:false,
+                 scales:{x:{ticks:{autoSkip:false}},y:{min:1000,max:2000,ticks:{stepSize:100}}},
+                 plugins:{legend:{display:false}}}
+      });
+      mavInit=true;
+    }
+
+    async function refreshMavlink(){
+      try{
+        if(ctrl) ctrl.abort(); ctrl=new AbortController();
+        const r=await fetch('/metrics',{signal:ctrl.signal}); if(!r.ok) return;
+        const data=await r.json();
+
+        let latestChannels=null,radio={},exec={};
+        for(const [thr,kinds] of Object.entries(data)){
+          if(kinds.RC_CHANNELS_OVERRIDE?.length)
+            latestChannels=kinds.RC_CHANNELS_OVERRIDE.at(-1).channels;
+          if(kinds.RADIO_STATUS?.length) radio[thr]=kinds.RADIO_STATUS.at(-1);
+          if(kinds.MAVLINK_EXEC?.length) exec[thr]=kinds.MAVLINK_EXEC.at(-1).values;
+        }
+        if(latestChannels && channelsBarChart){
+          channelsBarChart.data.datasets[0].data=latestChannels.slice(0,16);
+          channelsBarChart.update();
+        }
+        document.getElementById('radioStatusBox').textContent=
+          Object.keys(radio).length
+            ? Object.entries(radio).map(([t,r])=>`${t} → quality=${r.quality} | stats=${r.stats.join(':')}`).join('\n')
+            : 'No RADIO_STATUS data';
+        document.getElementById('execBox').textContent=
+          Object.keys(exec).length
+            ? Object.entries(exec).map(([t,v])=>`${t} → exec=${v.join(':')}`).join('\n')
+            : 'No MAVLINK_EXEC data';
+      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+    }
+
+    /* ---------- GPS page ---------- */
+    function initGPS(){
+      /* satellite SNR bar chart */
+      const sCtx=document.getElementById('gpsStatusBarChart').getContext('2d');
+      gpsStatusBarChart=new Chart(sCtx,{
+        type:'bar',
+        data:{labels:Array.from({length:20},(_,i)=>`PRN ${i+1}`),
+              datasets:[{label:'SNR [dB]',data:Array(20).fill(null),
+                          backgroundColor:Array(20).fill('#9e9e9e'),
+                          borderColor:Array(20).fill('#9e9e9e')}]},
+        options:{animation:false,responsive:true,maintainAspectRatio:false,
+                 scales:{y:{beginAtZero:true,min:0,max:60,ticks:{stepSize:10}}},
+                 plugins:{legend:{display:false}}}
+      });
+
+      /* track map */
+      const mapCtx=document.getElementById('gpsMapChart').getContext('2d');
+      gpsMapChart=new Chart(mapCtx,{
+        type:'line',
+        data:{datasets:[
+          {label:'Old (>20)',borderColor:'red',backgroundColor:'red',fill:false,tension:0,pointRadius:3,data:[]},
+          {label:'Mid (10–20)',borderColor:'yellow',backgroundColor:'yellow',fill:false,tension:0,pointRadius:3,data:[]},
+          {label:'Recent (10)',borderColor:'green',backgroundColor:'green',fill:false,tension:0,pointRadius:3,data:[]},
+        ]},
+        options:{animation:false,spanGaps:true,responsive:true,maintainAspectRatio:false,
+                 scales:{x:{type:'linear',min:-50,max:50,grid:{color:'#ccc'}},
+                         y:{type:'linear',min:-50,max:50,grid:{color:'#ccc'}}},
+                 plugins:{legend:{display:true,position:'bottom'}}}
+      });
+      gpsInit=true;
+    }
+
+    /* lat/lon → flat X/Y (metres) */
+    function latLonToXY(lat,lon){
+      const R=6378137;
+      const dLat=(lat-originLat)*Math.PI/180;
+      const dLon=(lon-originLon)*Math.PI/180;
+      const x=dLon*R*Math.cos(originLat*Math.PI/180);
+      const y=dLat*R;
+      return {x,y};
+    }
+
+    async function refreshGPS(){
+      try{
+        if(ctrl) ctrl.abort(); ctrl=new AbortController();
+        const [statRes,posRes]=await Promise.all([
+          fetch('/gps_status',{signal:ctrl.signal}),
+          fetch('/gps_position',{signal:ctrl.signal})
+        ]);
+        if(!statRes.ok || !posRes.ok) return;
+        const stat=await statRes.json();
+        const pos =await posRes.json();
+
+        /* ----- Satellite bar chart ----- */
+        const thr=Object.keys(stat)[0];
+        if(thr){
+          const sats=stat[thr].satellites||[];
+          const snrArr=Array(20).fill(null);
+          const bgCol =Array(20).fill('#9e9e9e');
+          sats.forEach((s,i)=>{
+            if(i<20){
+              snrArr[i]=s.snr_db;
+              if(s.used) bgCol[i]='#4caf50';
+            }
+          });
+          gpsStatusBarChart.data.datasets[0].data=snrArr;
+          gpsStatusBarChart.data.datasets[0].backgroundColor=bgCol;
+          gpsStatusBarChart.data.datasets[0].borderColor=bgCol;
+          gpsStatusBarChart.update('none');
+        }
+
+        /* ----- Position line & map ----- */
+        const pThr=Object.keys(pos)[0];
+        if(pThr){
+          const p=pos[pThr];
+
+          const latStr = (p.lat != null) ? `${p.lat.toFixed(6)}°` : 'invalid';
+          const lonStr = (p.lon != null) ? `${p.lon.toFixed(6)}°` : 'invalid';
+          const altStr = (p.alt != null) ? `${p.alt.toFixed(1)} m` : 'invalid';
+
+          document.getElementById('positionText').textContent =
+            `${pThr} → lat=${latStr}, lon=${lonStr}, alt=${altStr}`;
+
+          /* update track only when coordinates valid */
+          if(p.lat != null && p.lon != null){
+            if(originLat===null){
+              originLat=p.lat; originLon=p.lon; gpsHistory=[];
+            }
+            const xy=latLonToXY(p.lat,p.lon);
+            gpsHistory.push(xy); if(gpsHistory.length>60) gpsHistory.shift();
+
+            const old=gpsHistory.slice(-50,-20);
+            const mid=gpsHistory.slice(-20,-10);
+            const rec=gpsHistory.slice(-10);
+
+            gpsMapChart.data.datasets[0].data=old;
+            gpsMapChart.data.datasets[1].data=mid;
+            gpsMapChart.data.datasets[2].data=rec;
+            gpsMapChart.update('none');
+          }
+        }else{
+          document.getElementById('positionText').textContent='No position data';
+        }
+
+      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+    }
+  </script>
+</body>
+</html>
