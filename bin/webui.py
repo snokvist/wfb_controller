@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Thread-Manager Live Monitor (v5.3 “ini-commands”)
+Thread-Manager Live Monitor (v5.4 “gps-metrics”)
 
-Changes vs v5.2
+Changes vs v5.3
 ────────────────
-•  Loads `[commands]` from /etc/commands.ini once at startup
-   – `/commands` → list of keys  
-   – `/exec`     → run mapped shell line, returns
-     `{"stdout":…, "stderr":…, "code":…}` (404 if unknown)
-•  New `/wifi_channel` endpoint  
-   – Replies with `channel=…;width=…;region=…\n`
-•  Removed external “settings” code + endpoint
-•  Existing metrics/stream logic untouched
+•  Parses `GLOBAL_POSITION_INT` and `GPS_STATUS` from the stream
+   – Converts units to metric/°/m s-¹ for easy Chart.js use
+•  Adds `/gps_position` and `/gps_status` endpoints that return the
+   latest entry of each type per thread
+•  Keeps every existing endpoint and behaviour intact
 """
 
 import argparse, socket, threading, time, re, pathlib, json, subprocess, configparser
@@ -63,7 +60,7 @@ def current_channel_blob() -> str:
     region = re.search(r"country\s+([A-Z]{2}):", reg).group(1)
     return f"channel={chan};width={width};region={region}\n"
 
-# ───────── regex helpers (unchanged) ─────────
+# ───────── regex helpers ─────────
 _RX_ANT_RE = re.compile(
     r"^(?P<freq>\d+):(?P<mcs>\d+):(?P<bw>\d+)\s+"
     r"(?P<ant>[0-9a-fA-F]+)\s+"
@@ -77,6 +74,15 @@ _TX_ANT_RE = re.compile(
 )
 _PKT_RE = re.compile(r"^(?P<vals>(?:\d+:){10}\d+)$")
 
+# ── GPS helpers ──
+_GPI_COL_RE = re.compile(
+    r"^(?P<cnt>\d+)\s+(?P<time_ms>\d+)\s+"
+    r"(?P<rest>[-\d:]+)$"
+)
+_GPS_SATS_RE = re.compile(
+    r"^(?P<cnt>\d+)\s+(?P<visible>\d+)\s+(?P<rest>.+)$"
+)
+
 PKT_FIELDS = [
     "count_p_all", "count_b_all", "count_p_dec_err",
     "count_p_session", "count_p_data", "count_p_uniq",
@@ -89,6 +95,7 @@ BUFFER = 100
 _metrics_lock = threading.Lock()
 _metrics: Dict[str, Dict[str, Deque[Dict[str, Any]]]] = defaultdict(
     lambda: {
+        # legacy keys
         "RX_ANT": deque(maxlen=BUFFER),
         "TX_ANT": deque(maxlen=BUFFER),
         "PKT":    deque(maxlen=BUFFER),
@@ -96,6 +103,9 @@ _metrics: Dict[str, Dict[str, Deque[Dict[str, Any]]]] = defaultdict(
         "RC_CHANNELS_OVERRIDE": deque(maxlen=BUFFER),
         "RADIO_STATUS":         deque(maxlen=BUFFER),
         "MAVLINK_EXEC":         deque(maxlen=BUFFER),
+        # new gps keys
+        "GLOBAL_POSITION_INT":  deque(maxlen=BUFFER),
+        "GPS_STATUS":           deque(maxlen=BUFFER),
     }
 )
 
@@ -133,6 +143,8 @@ class StreamClient(threading.Thread):
             "RC_CHANNELS_OVERRIDE": self._rc,
             "RADIO_STATUS":         self._radio,
             "MAVLINK_EXEC":         self._exec,
+            "GLOBAL_POSITION_INT":  self._gpi,
+            "GPS_STATUS":           self._gps_status,
         }
 
     def run(self):
@@ -165,7 +177,7 @@ class StreamClient(threading.Thread):
             fn(thread, ts, rest)
             self._maybe_flush()
 
-    # ── handlers ──
+    # ── handlers for legacy messages (unchanged) ──
     def _rx_ant(self, thread: str, ts: str, rest: str):
         m = _RX_ANT_RE.match(rest)
         if not m:
@@ -235,6 +247,113 @@ class StreamClient(threading.Thread):
             "values": list(map(int, rest.split(':')))
         })
 
+    # ── new GPS handlers ──
+    def _gpi(self, thread: str, ts: str, rest: str):
+        """
+        GLOBAL_POSITION_INT format emitted by C side:
+
+        <cnt> <time_ms> <lat>:<lon>:<alt>:<rel_alt>:<vx>:<vy>:<vz>:<hdg>
+        Units:
+          lat/lon 1 e-7 °  → °          (float)
+          alt      mm     → m          (float)
+          rel_alt  mm     → m          (float)
+          v*       cm/s   → m/s        (float)
+          hdg      cdeg   → °          (float, None if 655.35° sentinel 65535)
+        """
+        m = _GPI_COL_RE.match(rest)
+        if not m:
+            return
+
+        cnt       = int(m["cnt"])
+        time_ms   = int(m["time_ms"])
+        try:
+            lat, lon, alt, rel_alt, vx, vy, vz, hdg = map(int, m["rest"].split(":"))
+        except ValueError:
+            return
+
+        # Sentinel -1 → None
+        def _none_if(v, sentinel): return None if v == sentinel else v
+
+        lat_deg = _none_if(lat, -1)
+        if lat_deg is not None:
+            lat_deg /= 1e7
+
+        lon_deg = _none_if(lon, -1)
+        if lon_deg is not None:
+            lon_deg /= 1e7
+
+        alt_m = _none_if(alt, -1)
+        if alt_m is not None:
+            alt_m /= 1000.0
+
+        rel_alt_m = _none_if(rel_alt, -1)
+        if rel_alt_m is not None:
+            rel_alt_m /= 1000.0
+
+        vx_ms = _none_if(vx, -1)
+        if vx_ms is not None:
+            vx_ms /= 100.0
+
+        vy_ms = _none_if(vy, -1)
+        if vy_ms is not None:
+            vy_ms /= 100.0
+
+        vz_ms = _none_if(vz, -1)
+        if vz_ms is not None:
+            vz_ms /= 100.0
+
+        hdg_deg = None
+        if hdg not in (-1, 65535):
+            hdg_deg = hdg / 100.0
+
+        self._local[thread]["GLOBAL_POSITION_INT"].append({
+            "ts": int(ts),
+            "count": cnt,
+            "time_boot_ms": time_ms,
+            "lat": lat_deg,
+            "lon": lon_deg,
+            "alt": alt_m,
+            "rel_alt": rel_alt_m,
+            "vx": vx_ms,
+            "vy": vy_ms,
+            "vz": vz_ms,
+            "hdg": hdg_deg,
+        })
+
+    def _gps_status(self, thread: str, ts: str, rest: str):
+        """
+        GPS_STATUS format emitted by C side:
+
+        <cnt> <visible> <prn>:<used>:<elev>:<azim>:<snr>| ... (20 entries)
+        """
+        m = _GPS_SATS_RE.match(rest)
+        if not m:
+            return
+        cnt = int(m["cnt"])
+        vis = int(m["visible"])
+        sats_raw = m["rest"].split('|')
+
+        sats = []
+        for tok in sats_raw:
+            try:
+                prn, used, elev, azim, snr = map(int, tok.split(':'))
+            except ValueError:
+                continue
+            sats.append({
+                "prn": prn,
+                "used": bool(used),
+                "elev_deg": elev,
+                "azim_deg": azim,
+                "snr_db": snr,
+            })
+
+        self._local[thread]["GPS_STATUS"].append({
+            "ts": int(ts),
+            "count": cnt,
+            "visible": vis,
+            "satellites": sats
+        })
+
     # ── batching ──
     def _maybe_flush(self):
         self._since_flush += 1
@@ -245,6 +364,16 @@ class StreamClient(threading.Thread):
             self._last_flush_t = now
 
 # ───────── flask app ─────────
+def _latest_per_thread(key: str) -> Dict[str, Any]:
+    """Return the most recent deque entry of *key* for every thread."""
+    out: Dict[str, Any] = {}
+    with _metrics_lock:
+        for thr, kinds in _metrics.items():
+            dq = kinds.get(key)
+            if dq:
+                out[thr] = dq[-1]   # newest
+    return out
+
 def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
     app = Flask(__name__, static_folder=None)
 
@@ -254,6 +383,17 @@ def create_app(host: str, port: int, ui_path: Optional[pathlib.Path]) -> Flask:
         with _metrics_lock:
             data = {t: {k: list(d) for k, d in v.items()} for t, v in _metrics.items()}
         return Response(json.dumps(data, separators=(",", ":")),
+                        mimetype="application/json")
+
+    # ── NEW: gps helpers ──
+    @app.route("/gps_position")
+    def gps_position_api() -> Response:
+        return Response(json.dumps(_latest_per_thread("GLOBAL_POSITION_INT"), separators=(",", ":")),
+                        mimetype="application/json")
+
+    @app.route("/gps_status")
+    def gps_status_api() -> Response:
+        return Response(json.dumps(_latest_per_thread("GPS_STATUS"), separators=(",", ":")),
                         mimetype="application/json")
 
     # ── commands list ──
