@@ -105,6 +105,19 @@ def parse_frame(frame: bytes):
     elif ftype in (0x10, 0x0B):
         pass  # nothing useful for humans
 
+    elif ftype == 0x2E and len(pl) >= 6:               # ELRS Status (extended frame)
+        dst, src           = pl[0], pl[1]
+        bad                = pl[2]
+        good               = int.from_bytes(pl[3:5], 'little')
+        flags              = pl[5]
+        txt                = pl[6:].split(b'\0',1)[0].decode(errors='replace')
+        flag_text = []
+        if flags & 0x01: flag_text.append("connected")
+        if flags & 0x04: flag_text.append("model-mismatch")
+        if flags & 0x08: flag_text.append("armed")
+        print(f"ELRS : {good} good / {bad} bad  flags={flags:#02x} "
+              f"({' '.join(flag_text) or '—'}) {txt}")
+        
     else:
         print(f"*Unhandled* type 0x{ftype:02X} ({len(pl)} bytes)")
 
@@ -153,4 +166,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nbye!")
-
