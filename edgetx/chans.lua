@@ -1,5 +1,5 @@
 ------------------------------------------------------------
---  Streams CH1-CH16 @1 Hz **only when SF=ON**
+--  Streams CH1-CH16 @1 Hz **only when SF = ON**
 --  Listens anytime for
 --      GV,<idx>,<val>
 --      GV,<fm>,<idx>,<val>
@@ -8,10 +8,17 @@
 local BAUD         = 115200
 local PERIOD_TICKS = 100          -- 100 × 10 ms ≈ 1 s
 
+-- ✦ special-GVAR watchdog ---------------------------------
+local SPECIAL_FM       = 0        -- flight mode 0
+local SPECIAL_IDX      = 0        -- GVAR 0
+local SPECIAL_TIMEOUT  = 100      -- 1 000 ms = 100 ticks
+local lastSpecialUpdate = 0       -- <<< timestamp of the last external update
+------------------------------------------------------------
+
 local nextTime     = 0            -- next CH dump deadline
 local rxBuf        = ""           -- rolling RX buffer
 
--- New API on EdgeTX ≥2.8
+-- New API on EdgeTX ≥ 2.8
 local haveOutValue = type(getOutputValue) == "function"
 
 ------------------------------------------------------------
@@ -33,11 +40,20 @@ local function sendChannels()
   serialWrite(line .. "\n")
 end
 
+-- ✦ watchdog helper --------------------------------------
+local function touchSpecial(fm, idx)           -- <<< stamp when GV0/FM0 touched
+  if fm == SPECIAL_FM and idx == SPECIAL_IDX then
+    lastSpecialUpdate = getTime()              -- <<<
+  end
+end
+------------------------------------------------------------
+
 local function setGvar(fm, idx, val)
   if fm < 0 or fm > 8 or idx < 0 or idx > 15 or val < -1024 or val > 1024 then
     serialWrite("ERR\n")
   else
     model.setGlobalVariable(idx, fm, val)
+    touchSpecial(fm, idx)                      -- <<< record external update
     serialWrite("OK\n")
   end
 end
@@ -64,6 +80,19 @@ local function handleLine(line)
   serialWrite("ERR\n")  -- unknown command
 end
 
+------------------------------------------------------------
+-- Special-GVAR enforcement  -------------------------------
+local function enforceSpecial()                -- <<< runs every tick
+  local now = getTime()
+  if now - lastSpecialUpdate > SPECIAL_TIMEOUT then
+    -- only write if necessary to avoid waste
+    if model.getGlobalVariable(SPECIAL_IDX, SPECIAL_FM) ~= -1024 then
+      model.setGlobalVariable(SPECIAL_IDX, SPECIAL_FM, -1024)
+    end
+  end
+end
+------------------------------------------------------------
+
 local function processSerial()
   while true do
     local pos = string.find(rxBuf, "[\r\n]")
@@ -82,6 +111,7 @@ end
 local function init()
   setSerialBaudrate(BAUD)
   nextTime = getTime() + PERIOD_TICKS
+  lastSpecialUpdate = getTime()               -- <<< start watchdog timer
 end
 
 -- Common RX drain + command processing
@@ -89,6 +119,7 @@ local function rxLoop()
   local fresh = serialRead()
   if fresh ~= "" then rxBuf = rxBuf .. fresh end
   if rxBuf ~= "" then processSerial() end
+  enforceSpecial()                            -- <<< keep special GVAR safe
 end
 
 -- Called when Special Function is **ON**
