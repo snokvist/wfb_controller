@@ -1,3 +1,8 @@
+// All logs
+// printf '\n' | nc 127.0.0.1 9500
+// Only IDs that start with "auth" or "db"
+// printf 'auth,db\n' | nc 127.0.0.1 9500
+
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
