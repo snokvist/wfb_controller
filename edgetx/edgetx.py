@@ -3,22 +3,18 @@
 EdgeTX → RC_CHANNELS_OVERRIDE bridge + Wi-Fi link-health G-VAR
 =============================================================
 
-Default stdout (quiet):
-    RC_CHANNELS_OVERRIDE …
-    MAVLINK_EXEC …
+* Reads CH,<16> lines and emits RC_CHANNELS_OVERRIDE (default 1000-2000 µs).
+* Non-blocking stick-to-command execution, auto-reconnects, penalty-based
+  link score → GV 0, debug toggle, etc.
 
-Add `--debug`   → verbose diagnostics  
-Add `--disable-penalty` → raw RSSI, no deductions
+NEW
+---
+Change **`OUT_MIN` / `OUT_MAX`** below (keep them symmetric around 1500 µs)
+to rescale the RC output range without touching the rest of the code.
+For example:
 
-Features
---------
-* Reads CH,<16> lines from EdgeTX, maps **-1024…+1024 → 1000…2000 µs**.
-* Runs /usr/bin/channels.sh on stick moves (non-blocking).
-* Calculates link score: best RSSI (-100…-30 dBm → 1000…2000 µs)
-  minus penalties for **lost > FEC > low diversity** (≤ 750 µs).
-* Sends score as GV 0 (converted to -1024…+1024).
-* Serial port **auto-reconnects every 3 s**; Wi-Fi pipe auto-reconnects too.
-* All prints use `flush=True`.
+    OUT_MIN = 1012
+    OUT_MAX = 1988
 """
 
 from __future__ import annotations
@@ -31,9 +27,13 @@ try:
 except ModuleNotFoundError:
     sys.stderr.write("pip install pyserial\n"); sys.exit(1)
 
-# ───────── constants ────────────────────────────────────────────────────
-PWM_MIN, PWM_MAX = 1000, 2000
+# ───────── output scaling (edit here) ───────────────────────────────────
+OUT_MIN, OUT_MAX = 988, 2012                 # <-- set e.g. 1012, 1988
+# -----------------------------------------------------------------------
+
+PWM_MIN, PWM_MAX = OUT_MIN, OUT_MAX
 PWM_RANGE        = PWM_MAX - PWM_MIN
+HALF_RANGE       = PWM_RANGE / 2              # used for channel mapping
 
 GV_MIN, GV_MAX   = -1024, 1024
 
@@ -45,7 +45,6 @@ SERIAL_RETRY_SEC  = 3
 WFBRX_RETRY_SEC   = 3
 
 SCRIPT = Path("/usr/bin/channels.sh")
-
 r_pkt, r_rxant = re.compile(r"\bPKT\b"), re.compile(r"\bRX_ANT\b")
 
 # ───────── helpers ──────────────────────────────────────────────────────
@@ -57,22 +56,20 @@ def rssi_to_pwm(rssi:int)->int:
 
 def pwm_to_gv(pwm:int)->int:
     pwm = _clamp(pwm, PWM_MIN, PWM_MAX)
-    return int(round((pwm - 1500) * 1024 / 500))          # –1024…+1024
+    return int(round((pwm - 1500) * 1024 / HALF_RANGE))
 
 def chan_raw_to_pwm(raw:int)->int:
-    """EdgeTX channel –1024…+1024 ⇒ 1000…2000 µs"""
-    return int(round(1500 + _clamp(raw,-1024,1024) * 500 / 1024))
+    """EdgeTX channel –1024…+1024 ⇒ OUT_MIN…OUT_MAX µs (symmetric)"""
+    return int(round(1500 + _clamp(raw, -1024, 1024) * HALF_RANGE / 1024))
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-# ───────── Wi-Fi reader (background) ────────────────────────────────────
+# ------------- Wi-Fi reader thread (unchanged) -------------------------
 class WfbReader(threading.Thread):
     def __init__(self, sniffer:'EdgeTXSniffer', *,
                  disable_penalty:bool, debug:bool)->None:
         super().__init__(daemon=True)
         self.sniffer, self.disable_penalty, self.debug = sniffer, disable_penalty, debug
-
-    # penalty calculator
     @staticmethod
     def _penalty(lost:int, fec:int, ratio:float)->tuple[int,int,int,int]:
         p_lost = (lost*200) if lost<=3 else 600+(lost-3)*50
@@ -85,7 +82,6 @@ class WfbReader(threading.Thread):
         else:           p_div=0
         p_total=_clamp(p_lost+p_fec+p_div,0,MAX_PENALTY)
         return p_total,p_lost,p_fec,p_div
-
     def run(self)->None:
         while True:
             try:
@@ -129,7 +125,6 @@ class WfbReader(threading.Thread):
                         best=None
             except Exception as exc:                   # pylint: disable=broad-except
                 if self.debug: print(f"[WARN] WiFi reader err: {exc}", flush=True)
-            # retry
             try:
                 if proc and proc.poll() is None: proc.kill()
             except Exception: pass
@@ -138,7 +133,7 @@ class WfbReader(threading.Thread):
                       flush=True)
             time.sleep(WFBRX_RETRY_SEC)
 
-# ───────── main sniffer ────────────────────────────────────────────────
+# ------------- main sniffer (identical except uses chan_raw_to_pwm) -----
 class EdgeTXSniffer:                             # pylint: disable=too-many-instance-attributes
     _POLL_SLEEP=0.01
     def __init__(self,*,port:str,baud:int,period_ms:int,debug:bool,
@@ -151,7 +146,6 @@ class EdgeTXSniffer:                             # pylint: disable=too-many-inst
         self.period_ms=max(1,period_ms); self.period_sec=self.period_ms/1000
         self._start=time.time(); self._next=self._start+self.period_sec
         self.latest_pwm=[1500]*16; self.rc_cnt=0
-        # command-parse
         self.cmd_parse,self.min_change,self.persist_ms,self.pause_ms = \
             command_parse,min_change,persist_ms,pause_ms
         self.allowed=channels_filter
@@ -162,7 +156,7 @@ class EdgeTXSniffer:                             # pylint: disable=too-many-inst
         if self.debug:
             print(f"[INFO] {self.port}@{self.baud} agg={self.period_ms}ms",flush=True)
         WfbReader(self, disable_penalty=disable_penalty, debug=debug).start()
-    # serial connect / reconnect
+    # serial helpers (unchanged) …
     def _connect_serial(self)->None:
         while True:
             try: self.ser=serial.Serial(self.port,self.baud,timeout=0.1); break
@@ -178,15 +172,15 @@ class EdgeTXSniffer:                             # pylint: disable=too-many-inst
             self.ser=None
         if self.debug: print("[WARN] serial lost – reconnect …",flush=True)
         self._connect_serial()
-    # GV sender (from Wi-Fi)
+    # GV sender (unchanged)
     def send_gv(self,val:int)->None:
         with self.serial_lock:
             if self.ser:
                 try: self.ser.write(f"GV,0,{val}\n".encode())
                 except serial.SerialException: self._reset_serial(); return
         if self.debug: print(f"[>>] GV,0,{val}",flush=True)
-    # main loop
-    def run(self)->None:                            # pylint: disable=too-many-branches
+    # main loop (unchanged) …
+    def run(self)->None:
         try:
             while True:
                 now=time.time()
@@ -201,20 +195,20 @@ class EdgeTXSniffer:                             # pylint: disable=too-many-inst
                 if not line: time.sleep(self._POLL_SLEEP)
         except KeyboardInterrupt:
             if self.debug: print("[INFO] terminated",flush=True)
-    # CH handler (fixed scaling)
+    # CH handler uses new scaling
     def _handle_ch(self,line:str)->None:
         parts=line.split(",")
         if len(parts)!=17: return
         try: raws=[int(x) for x in parts[1:]]
         except ValueError: return
-        self.latest_pwm=[chan_raw_to_pwm(v) for v in raws]   # **1000-2000**
+        self.latest_pwm=[chan_raw_to_pwm(v) for v in raws]   # OUT_MIN…OUT_MAX
         self.rc_cnt+=1
         if self.cmd_parse: self._eval_channels(self.latest_pwm)
+    # remaining methods identical …
     def _print_override(self)->None:
         ts=int((time.time()-self._start)*1000)
         print(f"{ts} RC_CHANNELS_OVERRIDE {self.rc_cnt} 0 0 "
               f"{':'.join(map(str,self.latest_pwm))}",flush=True)
-    # command-parse (unchanged)
     def _eval_channels(self,pwm:List[int])->None:
         now=self._now_ms()
         for idx,val in enumerate(pwm):
@@ -251,7 +245,7 @@ class EdgeTXSniffer:                             # pylint: disable=too-many-inst
         self.next_allowed_ms=now_ms+self.pause_ms; return True
     def _now_ms(self)->int: return int((time.time()-self._start)*1000)
 
-# ───────── CLI ─────────────────────────────────────────────────────────
+# ───────── CLI (unchanged) ────────────────────────────────────────────
 def _parse_filter(txt:Optional[str])->Optional[set[int]]:
     if not txt: return None
     try: s={int(x) for x in txt.split(',') if x.strip()}
@@ -264,13 +258,11 @@ def _args()->argparse.Namespace:
     p.add_argument("--baud",type=int,default=115200)
     p.add_argument("--period",type=int,default=1000,metavar="MS")
     p.add_argument("--debug",action="store_true")
-    # command-parse
     p.add_argument("--command-parse",action="store_true")
     p.add_argument("--min-change",type=int,default=100)
     p.add_argument("--persist",type=int,default=500,metavar="MS")
-    p.add_argument("--pause", type=int,default=500,metavar="MS")
+    p.add_argument("--pause",type=int,default=500,metavar="MS")
     p.add_argument("--channels")
-    # GVAR penalties
     p.add_argument("--disable-penalty",action="store_true")
     return p.parse_args()
 def main()->None:
