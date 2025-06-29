@@ -12,45 +12,70 @@
     :root{--bg:#e8f0ff;--fg:#023;--accent:#1976d2;--card:#fff}
     *{box-sizing:border-box}
     body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+
+    /* ---------- common layout ---------- */
     header{background:var(--accent);color:#fff;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;padding:.7rem 1rem}
     header h1{margin:0;font-size:1rem}
     button.btn{border:none;background:#fff;color:var(--accent);padding:.35rem .9rem;border-radius:6px;font-weight:600;cursor:pointer}
     .statsline{font-size:.9rem;width:100%;margin-top:.2rem}
+
     .tabs{display:flex;position:sticky;top:0;z-index:1;background:var(--bg)}
     .tab{flex:1;padding:.55rem 0;text-align:center;font-weight:600;border:none;background:#cde0ff;color:var(--fg);cursor:pointer}
     .tab.active{background:#fff;border-bottom:3px solid var(--accent)}
+
     section{padding:1rem}.tab-content{display:none}.tab-content.active{display:block}
     .thread{margin:.35rem 0;font-size:.95rem;font-weight:600}
+
     .chart-title{font-size:.8rem;color:#555;margin:.1rem 0 .2rem}
     .card,.chart{background:var(--card);border-radius:8px;box-shadow:0 2px 4px #0002;margin:.35rem 0;padding:.4rem .6rem}
     .card{white-space:pre-wrap;font-family:monospace;font-size:.78rem;overflow-x:auto}
+
     canvas{width:100%!important;height:220px!important}@media(max-width:600px){canvas{height:150px!important}}
+
+    /* ---------- COMMANDS styles ---------- */
+    .cmd-btn{width:48%;margin:.25rem 1%;padding:.5rem;border:none;border-radius:6px;background:#1976d2;color:#fff;font-weight:600;cursor:pointer;display:inline-block}
+    #cmd-out{
+      background:#000;color:#0f0;font-family:monospace;font-size:.8rem;
+      padding:.5rem .7rem;border-radius:6px;margin-top:.5rem;
+      height:calc(1.2em*10);          /* exactly 10 lines tall */
+      line-height:1.2em;
+      overflow-y:auto;
+      white-space:pre-wrap
+    }
+    .collapsible-title{font-weight:bold;margin-bottom:.5rem;cursor:pointer;user-select:none;transition:background .2s;padding:.25rem;border-radius:4px}
+    .collapsible-title:hover{background:#d0e4ff}
+    .collapsible-body{overflow:hidden;transition:max-height .3s ease-out;margin-top:.5rem;max-height:1000px}
+    .collapsible.collapsed .collapsible-body{max-height:0;margin-top:0;padding:0}
+    .collapsible.collapsed .collapsible-title::after{content:' [+]'}
+    .collapsible-title::after{content:' [\2013]';float:right}
+
     /* MAVLINK section styles */
     #mavlink .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
     #mavlink .status-box,#mavlink .exec-box,
     #gps .status-box{background:var(--card);border-radius:6px;box-shadow:0 1px 3px #0002;padding:.5rem .7rem;margin:.5rem 0;font-family:monospace;font-size:.8rem;white-space:pre-wrap}
-    /* GPS section tweaks */
+
+    /* GPS tweaks */
     #gps .bar-chart-title{font-size:.9rem;color:#333;margin-bottom:.3rem;text-align:center}
     #gpsMapWrap{max-width:500px;margin:.7rem auto}
     #gpsMapChart{width:500px!important;height:500px!important}
   </style>
 
-  <!-- Global Chart.js defaults -->
   <script>
-    Chart.defaults.plugins.decimation = { enabled:true, algorithm:'lttb', samples:50 };
+    Chart.defaults.plugins.decimation={enabled:true,algorithm:'lttb',samples:50};
   </script>
 </head>
 
 <body>
   <header>
     <h1>Thread-Manager</h1>
-    <button id="mode"   class="btn">STATS</button>
-    <button id="mavBtn" class="btn">MAVLINK</button>
-    <button id="gpsBtn" class="btn">GPS</button>
+    <button id="mode"      class="btn">STATS</button>
+    <button id="mavBtn"    class="btn">MAVLINK</button>
+    <button id="gpsBtn"    class="btn">GPS</button>
+    <button id="cmdToggle" class="btn">COMMANDS</button>
     <div id="bytesline" class="statsline"></div>
   </header>
 
-  <!-- METRICS (RX/TX) -------------------------------------------------------->
+  <!-- METRICS -------------------------------------------------------------->
   <div id="metrics">
     <div class="tabs">
       <button class="tab active" data-tab="rx">RX</button>
@@ -60,17 +85,20 @@
     <section id="tx" class="tab-content"></section>
   </div>
 
-  <!-- MAVLINK --------------------------------------------------------------->
+  <!-- COMMANDS ------------------------------------------------------------->
+  <section id="commands" style="display:none"></section>
+
+  <!-- MAVLINK -------------------------------------------------------------->
   <section id="mavlink" style="display:none">
     <div class="chart bar-chart-container">
-      <div class="bar-chart-title">RC_CHANNELS_OVERRIDE (Channels 1–16)</div>
+      <div class="bar-chart-title">RC_CHANNELS_OVERRIDE (Channels&nbsp;1–16)</div>
       <canvas id="channelsBarChart"></canvas>
     </div>
     <div class="status-box" id="radioStatusBox">Loading RADIO_STATUS…</div>
     <div class="exec-box"   id="execBox">Loading MAVLINK_EXEC…</div>
   </section>
 
-  <!-- GPS ------------------------------------------------------------------->
+  <!-- GPS ------------------------------------------------------------------>
   <section id="gps" style="display:none">
     <div class="chart bar-chart-container">
       <div class="bar-chart-title">Satellite SNR (used ✔︎ = green, unused = grey)</div>
@@ -86,52 +114,45 @@
   </section>
 
   <script>
-    /* ---------- constants & helpers ---------- */
-    const MAX   = 100;
-    const pool  = ['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
-    const colour = i => pool[i % pool.length];
-    const charts   = new Map();
-    const wrappers = new Map();
-    const ckey = (tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
-    const ERR_KEYS = ['bad','lost','rec','dec'];
-    const THR_KEYS = ['all','out','uniq'];
+    /* ---------- constants ---------- */
+    const MAX=100;
+    const pool=['#1976d2','#ef5350','#66bb6a','#ffa726','#ab47bc','#26c6da','#ff7043','#8d6e63','#42a5f5','#d4e157'];
+    const colour=i=>pool[i%pool.length];
+    const charts=new Map(),wrappers=new Map();
+    const ckey=(tab,thr,sfx)=>`${tab}:${thr}:${sfx}`;
+    const ERR_KEYS=['bad','lost','rec','dec'];
+    const THR_KEYS=['all','out','uniq'];
 
     /* state */
-    let mode='graphs', view='metrics';
-    const interval=1000;      // refresh period (ms)
-    let timer, ctrl=null;     // fetch AbortController
+    let mode='graphs',view='metrics';
+    const interval=1000; let timer,ctrl=null;
 
     /* MAVLink state */
-    let mavInit=false;
-    let channelsBarChart=null;
+    let mavInit=false; let channelsBarChart=null;
 
     /* GPS state */
-    let gpsInit=false;
-    let gpsStatusBarChart=null;
-    let gpsMapChart=null;
-    let gpsHistory=[];          // up to 60 {x,y}
-    let originLat=null, originLon=null;
+    let gpsInit=false; let gpsStatusBarChart=null,gpsMapChart=null;
+    let gpsHistory=[]; let originLat=null,originLon=null;
 
-    /* pause updates when tab hidden */
-    document.addEventListener('visibilitychange',()=>{
-      if(document.hidden) clearTimeout(timer); else sched();
-    });
+    document.addEventListener('visibilitychange',()=>{document.hidden?clearTimeout(timer):sched();});
 
-    /* ---------- DOM controls ---------- */
-    const modeBtn   = document.getElementById('mode');
-    const mavBtn    = document.getElementById('mavBtn');
-    const gpsBtn    = document.getElementById('gpsBtn');
-    const bytesLine = document.getElementById('bytesline');
+    /* ---------- DOM elements ---------- */
+    const modeBtn   =document.getElementById('mode');
+    const mavBtn    =document.getElementById('mavBtn');
+    const gpsBtn    =document.getElementById('gpsBtn');
+    const cmdToggle =document.getElementById('cmdToggle');
+    const bytesLine =document.getElementById('bytesline');
 
     modeBtn.onclick=()=>{
       if(view!=='metrics') switchTo('metrics');
-      mode = (mode==='stats') ? 'graphs' : 'stats';
-      modeBtn.textContent=(mode==='stats') ? 'GRAPHS' : 'STATS';
-      if(mode==='graphs'){ wrappers.forEach(w=>w.remove()); wrappers.clear(); charts.clear(); }
+      mode=(mode==='stats')?'graphs':'stats';
+      modeBtn.textContent=(mode==='stats')?'GRAPHS':'STATS';
+      if(mode==='graphs'){wrappers.forEach(w=>w.remove());wrappers.clear();charts.clear();}
       refresh();
     };
-    mavBtn.onclick=()=>{ view==='mavlink'?switchTo('metrics'):switchTo('mavlink'); };
-    gpsBtn.onclick=()=>{ view==='gps'   ?switchTo('metrics'):switchTo('gps'); };
+    mavBtn.onclick=()=>{view==='mavlink'?switchTo('metrics'):switchTo('mavlink');};
+    gpsBtn.onclick=()=>{view==='gps'?switchTo('metrics'):switchTo('gps');};
+    cmdToggle.onclick=()=>{view==='commands'?switchTo('metrics'):switchTo('commands');};
 
     document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
       document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t===b));
@@ -139,23 +160,28 @@
     });
 
     function switchTo(target){
-      ['metrics','mavlink','gps'].forEach(id=>document.getElementById(id).style.display='none');
+      ['metrics','commands','mavlink','gps'].forEach(id=>document.getElementById(id).style.display='none');
       document.getElementById(target).style.display='';
       view=target;
-      if(target==='mavlink'){ if(!mavInit) initMavlink(); refreshMavlink(); }
-      if(target==='gps'){ if(!gpsInit) initGPS(); refreshGPS(); }
+
+      if(target==='commands'){
+        const sec=document.getElementById('commands');
+        if(!sec.hasChildNodes()) loadCmd();
+      }
+      if(target==='mavlink'){if(!mavInit) initMavlink();refreshMavlink();}
+      if(target==='gps'){if(!gpsInit) initGPS();refreshGPS();}
       if(target==='metrics') refresh();
     }
 
     /* ---------- scheduler ---------- */
-    function sched(){ clearTimeout(timer);
+    function sched(){clearTimeout(timer);
       if(view==='metrics') refresh();
       else if(view==='mavlink') refreshMavlink();
       else if(view==='gps') refreshGPS();
       timer=setTimeout(sched,interval);
     } sched();
 
-    /* ---------- MAIN METRICS ---------- */
+    /* ---------- METRICS ---------- */
     const statsState={};
 
     async function refresh(){
@@ -166,16 +192,15 @@
 
         let inB=0,outB=0;
         Object.values(data).forEach(t=>{
-          const p=t.PKT?.at(-1); if(p){ inB+=p.count_b_all; outB+=p.count_b_outgoing; }
+          const p=t.PKT?.at(-1); if(p){inB+=p.count_b_all;outB+=p.count_b_outgoing;}
         });
         bytesLine.textContent=`Total in ${(inB*8e-6).toFixed(2)} Mbit/time | out ${(outB*8e-6).toFixed(2)} Mbit/time`;
 
         drawTab('rx',data,'RX_ANT',s=>s.rssi.avg);
         drawTab('tx',data,'TX_ANT',s=>s.latency.avg);
-      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+      }catch(e){if(e.name!=='AbortError') console.error(e);}
     }
 
-    /* ---------- TAB renderer (RX/TX) ---------- */
     function drawTab(tabId,data,antKey,ySel){
       const cont=document.getElementById(tabId);
       if(!statsState[tabId]) statsState[tabId]={};
@@ -189,12 +214,12 @@
           if(!tabState[thr]) tabState[thr]={pktTs:null,pktCount:0,ants:{}};
           const st=tabState[thr];
 
-          const th=document.createElement('div'); th.className='thread'; th.textContent=thr; frag.appendChild(th);
+          const th=document.createElement('div');th.className='thread';th.textContent=thr;frag.appendChild(th);
 
           let html='';
           if(kinds.PKT?.length){
             const p=kinds.PKT.at(-1);
-            if(p.ts===st.pktTs) st.pktCount++; else{ st.pktTs=p.ts; st.pktCount=0; }
+            if(p.ts===st.pktTs) st.pktCount++; else{st.pktTs=p.ts;st.pktCount=0;}
             if(st.pktCount<3){
               const hl=st.pktCount>0?'background:yellow;':'';
               html+=`<span style="${hl}">PKT: all=${p.count_p_all} | bad=${p.count_p_bad} | data=${p.count_p_data} | dec_err=${p.count_p_dec_err} | fec_rec=${p.count_p_fec_recovered} | lost=${p.count_p_lost} | out=${p.count_p_outgoing} | sess=${p.count_p_session} | uniq=${p.count_p_uniq}</span>\n`;
@@ -205,19 +230,18 @@
           Object.keys(latestByAnt).sort().forEach(id=>{
             const s=latestByAnt[id];
             const ast=st.ants[id]||{ts:null,count:0};
-            if(s.ts===ast.ts) ast.count++; else{ ast.ts=s.ts; ast.count=0; }
+            if(s.ts===ast.ts) ast.count++; else{ast.ts=s.ts;ast.count=0;}
             st.ants[id]=ast; if(ast.count>=3) return;
             const hl=ast.count>0?'background:yellow;':'';
             if(s.latency){
-              html+=`<span style="${hl}">A:${id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.avg}ms</span>\n`;
+              html+=`<span style="${hl}">A:${id} | inj=${s.pkt_injected} | drop=${s.pkt_dropped} | lat_avg=${s.latency.avg} ms</span>\n`;
             }else{
               const dloss=(kinds.PKT?.at(-1)?.count_p_uniq||0)-s.packet_count;
-              html+=`<span style="${hl}">A:${id} | BW=${s.bw}MHz | F=${s.freq}MHz | PC=${s.packet_count} | RA=${s.rssi.avg}dBm | SA=${s.snr.avg}dB | dloss=${dloss}</span>\n`;
+              html+=`<span style="${hl}">A:${id} | BW=${s.bw} MHz | F=${s.freq} MHz | PC=${s.packet_count} | RA=${s.rssi.avg} dBm | SA=${s.snr.avg} dB | dloss=${dloss}</span>\n`;
             }
           });
 
-          const card=document.createElement('div'); card.className='card'; card.innerHTML=html.trim();
-          frag.appendChild(card);
+          const card=document.createElement('div');card.className='card';card.innerHTML=html.trim();frag.appendChild(card);
         });
         cont.replaceChildren(frag);
         return;
@@ -241,7 +265,6 @@
       }
     }
 
-    /* ---------- generic strip chart ---------- */
     function renderStrip(tab,thr,sfx,title,samples,keyFn,valFn,ySel,yExtra={},fixedOrder=null){
       const id=ckey(tab,thr,sfx);
       let wrap=wrappers.get(id);
@@ -295,7 +318,6 @@
       markDirty(chart);
     }
 
-    /* ---------- batch-update helper ---------- */
     const dirtyCharts=new Set(); let chartFlush=false;
     function markDirty(chart){
       dirtyCharts.add(chart);
@@ -308,7 +330,70 @@
       }
     }
 
-    /* ---------- MAVLINK page ---------- */
+    /* ---------- COMMANDS section ---------- */
+    async function loadCmd(){
+      const sec=document.getElementById('commands');
+      sec.innerHTML='<p>Loading…</p>';
+      try{
+        const cmds=await (await fetch('/commands')).json();
+        const groups={settings:[],gs:[],vtx:[],other:[]};
+        cmds.forEach(c=>{
+          if(c.startsWith('settings_')) groups.settings.push(c);
+          else if(c.startsWith('gs_'))  groups.gs.push(c);
+          else if(c.startsWith('vtx_')) groups.vtx.push(c);
+          else groups.other.push(c);
+        });
+        function block(title,list){
+          if(!list.length) return '';
+          const btns=list.map(c=>`<button class="cmd-btn" data-cmd="${c}">${c}</button>`).join('');
+          return `<div class="card collapsible collapsed">
+                   <div class="collapsible-title">${title}</div>
+                   <div class="collapsible-body">${btns}</div>
+                 </div>`;
+        }
+        sec.innerHTML=
+          block('Settings',groups.settings)+
+          block('Groundstation',groups.gs)+
+          block('VTX',groups.vtx)+
+          block('Other',groups.other)+
+          '<div id="cmd-out"></div>';
+
+        sec.querySelectorAll('.cmd-btn').forEach(b=>b.onclick=execCmd);
+        sec.querySelectorAll('.collapsible-title').forEach(t=>t.onclick=()=>t.parentElement.classList.toggle('collapsed'));
+      }catch(e){
+        sec.innerHTML=`<p style="color:red">ERROR ${e}</p>`;
+      }
+    }
+
+    async function execCmd(e){
+      const b=e.target;
+      const cmd=b.dataset.cmd;
+      b.disabled=true;
+      const out=document.getElementById('cmd-out');
+
+      /* keep all previous output, append new entry */
+      const prev=out.textContent;
+      const sep=prev?'\n':'';
+      out.textContent=prev+`${sep}$ ${cmd}\n…`;
+      out.scrollTop=out.scrollHeight;
+
+      try{
+        const resp=await fetch('/exec',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({cmd})
+        });
+        const j=await resp.json();
+        const result=j.output??j.stdout??'(no output)';
+        out.textContent=prev+`${sep}$ ${cmd}\n${result}`;
+      }catch(err){
+        out.textContent=prev+`${sep}$ ${cmd}\nERROR ${err}`;
+      }
+      out.scrollTop=out.scrollHeight;   /* keep latest visible */
+      b.disabled=false;
+    }
+
+    /* ---------- MAVLINK section ---------- */
     function initMavlink(){
       const ctx=document.getElementById('channelsBarChart').getContext('2d');
       channelsBarChart=new Chart(ctx,{
@@ -335,7 +420,7 @@
           if(kinds.RADIO_STATUS?.length) radio[thr]=kinds.RADIO_STATUS.at(-1);
           if(kinds.MAVLINK_EXEC?.length) exec[thr]=kinds.MAVLINK_EXEC.at(-1).values;
         }
-        if(latestChannels && channelsBarChart){
+        if(latestChannels&&channelsBarChart){
           channelsBarChart.data.datasets[0].data=latestChannels.slice(0,16);
           channelsBarChart.update();
         }
@@ -347,12 +432,11 @@
           Object.keys(exec).length
             ? Object.entries(exec).map(([t,v])=>`${t} → exec=${v.join(':')}`).join('\n')
             : 'No MAVLINK_EXEC data';
-      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+      }catch(e){if(e.name!=='AbortError') console.error(e);}
     }
 
-    /* ---------- GPS page ---------- */
+    /* ---------- GPS section ---------- */
     function initGPS(){
-      /* satellite SNR bar chart */
       const sCtx=document.getElementById('gpsStatusBarChart').getContext('2d');
       gpsStatusBarChart=new Chart(sCtx,{
         type:'bar',
@@ -365,7 +449,6 @@
                  plugins:{legend:{display:false}}}
       });
 
-      /* track map */
       const mapCtx=document.getElementById('gpsMapChart').getContext('2d');
       gpsMapChart=new Chart(mapCtx,{
         type:'line',
@@ -382,7 +465,6 @@
       gpsInit=true;
     }
 
-    /* lat/lon → flat X/Y (metres) */
     function latLonToXY(lat,lon){
       const R=6378137;
       const dLat=(lat-originLat)*Math.PI/180;
@@ -399,11 +481,10 @@
           fetch('/gps_status',{signal:ctrl.signal}),
           fetch('/gps_position',{signal:ctrl.signal})
         ]);
-        if(!statRes.ok || !posRes.ok) return;
+        if(!statRes.ok||!posRes.ok) return;
         const stat=await statRes.json();
         const pos =await posRes.json();
 
-        /* ----- Satellite bar chart ----- */
         const thr=Object.keys(stat)[0];
         if(thr){
           const sats=stat[thr].satellites||[];
@@ -421,30 +502,23 @@
           gpsStatusBarChart.update('none');
         }
 
-        /* ----- Position line & map ----- */
         const pThr=Object.keys(pos)[0];
         if(pThr){
           const p=pos[pThr];
-
-          const latStr = (p.lat != null) ? `${p.lat.toFixed(6)}°` : 'invalid';
-          const lonStr = (p.lon != null) ? `${p.lon.toFixed(6)}°` : 'invalid';
-          const altStr = (p.alt != null) ? `${p.alt.toFixed(1)} m` : 'invalid';
-
-          document.getElementById('positionText').textContent =
+          const latStr=(p.lat!=null)?`${p.lat.toFixed(6)}°`:'invalid';
+          const lonStr=(p.lon!=null)?`${p.lon.toFixed(6)}°`:'invalid';
+          const altStr=(p.alt!=null)?`${p.alt.toFixed(1)} m`:'invalid';
+          document.getElementById('positionText').textContent=
             `${pThr} → lat=${latStr}, lon=${lonStr}, alt=${altStr}`;
 
-          /* update track only when coordinates valid */
-          if(p.lat != null && p.lon != null){
-            if(originLat===null){
-              originLat=p.lat; originLon=p.lon; gpsHistory=[];
-            }
+          if(p.lat!=null&&p.lon!=null){
+            if(originLat===null){originLat=p.lat;originLon=p.lon;gpsHistory=[];}
             const xy=latLonToXY(p.lat,p.lon);
             gpsHistory.push(xy); if(gpsHistory.length>60) gpsHistory.shift();
 
             const old=gpsHistory.slice(-50,-20);
             const mid=gpsHistory.slice(-20,-10);
             const rec=gpsHistory.slice(-10);
-
             gpsMapChart.data.datasets[0].data=old;
             gpsMapChart.data.datasets[1].data=mid;
             gpsMapChart.data.datasets[2].data=rec;
@@ -453,8 +527,7 @@
         }else{
           document.getElementById('positionText').textContent='No position data';
         }
-
-      }catch(e){ if(e.name!=='AbortError') console.error(e); }
+      }catch(e){if(e.name!=='AbortError') console.error(e);}
     }
   </script>
 </body>
