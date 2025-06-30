@@ -24,10 +24,7 @@ local wifiList = {44, 48, 104, 128, 140, 149, 157, 161}
 local cmdList = {
   {val = 1, label = "Reboot"},
   {val = 2, label = "Shutdown"},
-  {val = 3, label = "Update"},
-  {val = 4, label = "FactoryRST"},
-  {val = 5, label = "Start"},
-  {val = 6, label = "Stop"},
+  {val = 3, label = "Tog.Rec"},
 }
 ---------------------------------------------------------------------------
 
